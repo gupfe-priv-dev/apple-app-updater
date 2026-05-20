@@ -24,7 +24,7 @@ echo "==> Allowing passwordless sudo for update commands..."
 _sudoers_tmp=$(mktemp)
 printf '# Passwordless sudo for system update commands (update-all)\n%s ALL=(ALL) NOPASSWD: /usr/sbin/installer, /usr/sbin/softwareupdate\n' "$ME" > "$_sudoers_tmp"
 visudo -c -f "$_sudoers_tmp" || { echo "    ✗ sudoers syntax error"; rm "$_sudoers_tmp"; exit 1; }
-cat "$_sudoers_tmp" | /usr/libexec/authopen -c -m 0440 /etc/sudoers.d/update-all
+osascript -e "do shell script \"cp $_sudoers_tmp /etc/sudoers.d/update-all && chmod 0440 /etc/sudoers.d/update-all\" with administrator privileges"
 rm "$_sudoers_tmp"
 echo "    ✓ /etc/sudoers.d/update-all written"
 
