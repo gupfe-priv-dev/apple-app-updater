@@ -41,45 +41,44 @@ The registry is cached in `apps.json` next to the script. Only unmanaged apps ar
 
 ## Setup
 
-### 1. Prerequisites
+### Prerequisites
 
 ```bash
 brew install mas
 ```
 
-### 2. Build the app
+### Install
 
 ```bash
-./build-app.sh
+./install.sh
 ```
 
-This compiles `UpdateAll.swift` → `UpdateAll.app` and ad-hoc code-signs it.
+`install.sh` does everything in one shot — two macOS password dialogs will appear (for writing system files):
 
-### 3. Run at login (LaunchAgent)
+| Step | What it does |
+|------|-------------|
+| Build | Compiles `UpdateAll.swift` → `UpdateAll.app`, ad-hoc code-signs it |
+| LaunchAgent | Registers the app to open automatically at login |
+| Touch ID for sudo | Writes `/etc/pam.d/sudo_local` so `sudo` prompts with Touch ID instead of a password |
+| NOPASSWD sudoers | Writes `/etc/sudoers.d/update-all` so `installer` and `softwareupdate` need no prompt at all |
+| PATH | Symlinks `update-all` into `~/.local/bin` for CLI use |
 
-```bash
-cp com.gunnar.update-all.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.gunnar.update-all.plist
-```
+After install, `UpdateAll.app` opens at every login with no sudo prompts.
+Run manually anytime: `open UpdateAll.app` or `update-all` in a terminal.
 
-Or double-click `UpdateAll.app` to run manually.
+---
 
-### 4. Touch ID for sudo (recommended)
+### How the sudo setup works
 
-Some updates (cask installs, `softwareupdate`) need root.
-Enable Touch ID for sudo so the app can authenticate without a password prompt:
+**Touch ID (`/etc/pam.d/sudo_local`):**
+Enables Touch ID as an authentication method for all `sudo` commands.
+The file is included by `/etc/pam.d/sudo` and survives macOS updates.
+Written via `authopen` (macOS Authorization framework) which works even if `sudo` is broken.
 
-```bash
-printf '# sudo_local: local config file which survives system update and is included by /etc/pam.d/sudo\nauth       sufficient     pam_tid.so\n' \
-  | /usr/libexec/authopen -w /etc/pam.d/sudo_local
-```
-
-> **Why `authopen`?** `/etc/pam.d/sudo_local` is root-owned and SIP-adjacent.
-> `authopen` uses the macOS Authorization framework (GUI password dialog) to write the file,
-> bypassing the need for a working `sudo`. This is also safe to run even if `sudo` is broken.
-
-After this, `sudo` prompts with Touch ID instead of a password in any terminal or app.
-The file survives macOS updates (it's included by `/etc/pam.d/sudo` via `include sudo_local`).
+**NOPASSWD (`/etc/sudoers.d/update-all`):**
+Allows `installer` and `softwareupdate` to run as root without any prompt.
+These are the only two commands in the script that need root — cask pkg installs and macOS system updates.
+Everything else (brew formulae, mas, npm, gem, etc.) never needs root.
 
 ---
 
