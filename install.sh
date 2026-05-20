@@ -10,7 +10,7 @@ echo ""
 echo "==> Installing LaunchAgent (run at login)..."
 cp "$DIR/com.gunnar.update-all.plist" ~/Library/LaunchAgents/
 launchctl unload ~/Library/LaunchAgents/com.gunnar.update-all.plist 2>/dev/null || true
-launchctl load ~/Library/LaunchAgents/com.gunnar.update-all.plist
+launchctl load ~/Library/LaunchAgents/com.gunnar.update-all.plist 2>/dev/null || true
 echo "    ✓ Registered"
 
 echo ""
@@ -21,9 +21,11 @@ echo "    ✓ /etc/pam.d/sudo_local written"
 
 echo ""
 echo "==> Allowing passwordless sudo for update commands..."
-printf "# Passwordless sudo for system update commands (update-all)\n${ME} ALL=(ALL) NOPASSWD: /usr/sbin/installer, /usr/sbin/softwareupdate\n" \
-  | /usr/libexec/authopen -w /etc/sudoers.d/update-all
-visudo -c -f /etc/sudoers.d/update-all
+_sudoers_tmp=$(mktemp)
+printf '# Passwordless sudo for system update commands (update-all)\n%s ALL=(ALL) NOPASSWD: /usr/sbin/installer, /usr/sbin/softwareupdate\n' "$ME" > "$_sudoers_tmp"
+visudo -c -f "$_sudoers_tmp" || { echo "    ✗ sudoers syntax error"; rm "$_sudoers_tmp"; exit 1; }
+cat "$_sudoers_tmp" | /usr/libexec/authopen -c -m 0440 /etc/sudoers.d/update-all
+rm "$_sudoers_tmp"
 echo "    ✓ /etc/sudoers.d/update-all written"
 
 echo ""

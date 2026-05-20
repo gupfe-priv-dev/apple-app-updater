@@ -3,12 +3,6 @@ set -euo pipefail
 
 export _SCRIPT_DIR="${0:A:h}"
 
-# Pre-authenticate sudo once; keep the credential alive for the full run
-sudo -v
-( while true; do sudo -n true; sleep 240; done ) &
-_sudo_keepalive=$!
-trap "kill $_sudo_keepalive 2>/dev/null" EXIT INT TERM
-
 print_header() {
   local cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
   echo ""
