@@ -3,11 +3,49 @@ set -euo pipefail
 
 export _SCRIPT_DIR="${0:A:h}"
 
+# colors — only when stdout is a TTY
+if [[ -t 1 ]]; then
+  C_HEADER=$'\033[1;33m'  # bold yellow
+  C_RESET=$'\033[0m'
+else
+  C_HEADER=''
+  C_RESET=''
+fi
+
 print_header() {
   local cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
   echo ""
+  printf "${C_HEADER}"
   printf '━%.0s' {1..$cols}
   printf '\n  %s\n' "$1"
+  printf "${C_RESET}"
+}
+
+# Ask yes/no.
+#  - In a terminal: prints "  <question> [y/N] " and reads one keypress
+#  - Under UpdateAll.app (UPDATER_GUI=1) or any non-TTY context: pops a native
+#    macOS dialog via osascript. Returns 0 for yes, 1 for no.
+ask_yn() {
+  local question="$1"
+  if [[ -n "${UPDATER_GUI:-}" ]] || ! [[ -t 0 ]]; then
+    # escape any double-quotes in the question for safe AppleScript embedding
+    local q="${question//\"/\\\"}"
+    # bring UpdateAll.app to front first so the user can see who is asking,
+    # then show the dialog (which appears over our now-foreground app).
+    # `button returned of (...)` returns just "Yes" or "No" — no "button returned:" prefix.
+    local btn
+    btn=$(osascript \
+      -e 'tell application id "com.gunnar.update-all" to activate' \
+      -e "button returned of (display dialog \"$q\" buttons {\"No\", \"Yes\"} default button \"Yes\" with title \"Update All\")" \
+      2>/dev/null || echo "")
+    echo "  → ${btn:-cancelled}"
+    [[ "$btn" == "Yes" ]]
+  else
+    local _ans=""
+    printf '  %s [y/N] ' "$question"
+    read -k1 _ans 2>/dev/null || _ans=""; echo ""
+    [[ "$_ans" == [yY]* ]]
+  fi
 }
 
 # run a command, stream its output live, or print "✓ label" if nothing was produced
@@ -20,6 +58,8 @@ run_or_ok() {
   rm -f "$tmp"
 }
 
+printf "${C_HEADER}🔄 macOS Updater${C_RESET}\n"
+
 # ══════════════════════════════════════════
 #  1. UPDATE APP REGISTRY
 #     Scan /Applications vs brew/mas lists,
@@ -27,6 +67,9 @@ run_or_ok() {
 #     save to apps.json
 # ══════════════════════════════════════════
 print_header "App registry"
+# tempfile for Python → shell handoff of "safe to install" brew cask tokens
+_BREW_SAFE_LIST=$(mktemp)
+export _BREW_SAFE_LIST
 python3 - << 'PYEOF'
 import json, os, subprocess
 from pathlib import Path
@@ -67,8 +110,8 @@ def get_mas_apps():
     return result
 
 def load_cask_catalog():
-    """Download (or reuse cached) full Homebrew cask catalog. Returns app_name→token dict."""
-    catalog_path = REGISTRY.parent / 'brew_cask_catalog.json'
+    """Download (or reuse cached) full Homebrew cask catalog. Returns app_name→{token, version} dict."""
+    catalog_path = REGISTRY.parent / 'brew_cask_catalog_v2.json'
     import time
     # refresh if older than 24h
     if catalog_path.exists() and time.time() - catalog_path.stat().st_mtime < 86400:
@@ -84,17 +127,38 @@ def load_cask_catalog():
                 if isinstance(art, dict) and 'app' in art:
                     for app in art['app']:
                         if isinstance(app, str):
-                            catalog[app.lower().removesuffix('.app')] = c['token']
+                            catalog[app.lower().removesuffix('.app')] = {
+                                'token': c['token'],
+                                'version': c.get('version', ''),
+                            }
         catalog_path.write_text(json.dumps(catalog))
+        # remove orphaned old-format cache
+        old = REGISTRY.parent / 'brew_cask_catalog.json'
+        if old.exists():
+            try: old.unlink()
+            except Exception: pass
     return catalog
 
 _cask_catalog = None
 def find_brew_cask(app_name):
-    """Find a brew cask that actually installs this app. Returns cask token or None."""
+    """Find a brew cask that actually installs this app. Returns {token, version} dict or None."""
     global _cask_catalog
     if _cask_catalog is None:
         _cask_catalog = load_cask_catalog()
     return _cask_catalog.get(app_name.lower().removesuffix('.app'))
+
+def cmp_version(a, b):
+    """Return 1 if a > b, -1 if a < b, 0 if equal or undetermined."""
+    if not a or not b: return 0
+    a_clean = a.split(',')[0].split()[0]
+    b_clean = b.split(',')[0].split()[0]
+    if a_clean == b_clean: return 0
+    r = subprocess.run(['bash', '-c', f'printf "%s\\n%s\\n" "{a_clean}" "{b_clean}" | sort -V | tail -1'],
+                       capture_output=True, text=True)
+    top = r.stdout.strip()
+    if top == a_clean: return 1
+    if top == b_clean: return -1
+    return 0
 
 brew_managed = get_brew_apps()
 mas_managed  = get_mas_apps()
@@ -129,10 +193,10 @@ for name in sorted(unmanaged - set(registry)):
     # check if a brew cask exists for this app
     cask = find_brew_cask(name)
     if cask:
-        entry['brew_cask_available'] = cask
-        brew_suggestions.append((name, cask))
+        entry['brew_cask_available'] = cask['token']
+        brew_suggestions.append((name, cask['token']))
 
-    print(f'  + {name}  [{entry["manager"]}]{f"  → brew cask: {cask}" if cask else ""}')
+    print(f'  + {name}  [{entry["manager"]}]{f"  → brew cask: {cask["token"]}" if cask else ""}')
     registry[name] = entry; changed = True
 
 if changed:
@@ -144,23 +208,78 @@ else:
 counts = Counter(e['manager'] for e in registry.values())
 print(f'  sparkle: {counts.get("sparkle",0)}  electron: {counts.get("electron",0)}  unmanaged: {counts.get("unmanaged",0)}')
 
-# show all known brew cask suggestions (new + previously detected)
-all_suggestions = [(n, e['brew_cask_available']) for n, e in registry.items()
-                   if e.get('brew_cask_available') and n not in {s[0] for s in brew_suggestions}]
-brew_suggestions += all_suggestions
-if brew_suggestions:
-    print(f'\n  💡 Brew cask available for unmanaged apps:')
-    for app, cask in sorted(brew_suggestions):
-        print(f'     {app[:-4]}  →  brew install --cask {cask}')
+# categorize all brew-cask-available apps by version comparison
+safe = []       # brew >= installed (safe to install/upgrade)
+downgrade = []  # brew < installed (would downgrade, skip)
+unknown = []    # missing version info on either side
+
+for n, e in registry.items():
+    if not e.get('brew_cask_available'): continue
+    token = e['brew_cask_available']
+    cask_info = find_brew_cask(n) or {}
+    brew_ver = cask_info.get('version', '')
+    plist = APPS_DIR / n / 'Contents' / 'Info.plist'
+    installed_ver = plist_get(plist, 'CFBundleShortVersionString') if plist.exists() else ''
+    if not brew_ver or not installed_ver:
+        unknown.append((n, token, brew_ver, installed_ver))
+    else:
+        c = cmp_version(brew_ver, installed_ver)
+        if c >= 0:
+            safe.append((n, token, brew_ver, installed_ver))
+        else:
+            downgrade.append((n, token, brew_ver, installed_ver))
+
+if safe:
+    print(f'\n  💡 Brew cask available (safe — same or newer):')
+    for n, t, bv, iv in sorted(safe):
+        tag = f'{iv}' if bv == iv else f'{iv} → {bv}'
+        print(f'     {n[:-4]}  ({tag})  →  brew install --cask --force {t}')
+
+if downgrade:
+    print(f'\n  ⚠  Brew has older version (would downgrade — skipped):')
+    for n, t, bv, iv in sorted(downgrade):
+        print(f'     {n[:-4]}: installed {iv}, brew {bv}')
+
+if unknown:
+    print(f'\n  ?  Brew cask available (version unknown):')
+    for n, t, bv, iv in sorted(unknown):
+        print(f'     {n[:-4]}  →  brew install --cask --force {t}')
+
+# write safe-to-install cask tokens to tempfile for shell prompt
+safe_file = os.environ.get('_BREW_SAFE_LIST', '')
+if safe_file and safe:
+    with open(safe_file, 'w') as f:
+        for n, t, bv, iv in safe:
+            f.write(t + '\n')
 PYEOF
+
+# Offer to install the safe brew casks
+if [[ -s "$_BREW_SAFE_LIST" ]]; then
+  _safe_n=$(wc -l < "$_BREW_SAFE_LIST" | tr -d ' ')
+  echo ""
+  if ask_yn "Install all $_safe_n safe brew cask(s) now?"; then
+    while IFS= read -r _cask; do
+      [[ -z "$_cask" ]] && continue
+      echo ""
+      echo "  → brew install --cask --force $_cask"
+      brew install --cask --force "$_cask" || echo "    ✗ install failed for $_cask"
+    done < "$_BREW_SAFE_LIST"
+  else
+    echo "  ⊘ Skipped"
+  fi
+fi
+rm -f "$_BREW_SAFE_LIST"
+unset _BREW_SAFE_LIST
 
 # ══════════════════════════════════════════
 #  2. UPDATE MANAGED APPS
-#     brew (formulae + casks), mas, macOS
+#     brew (formulae + casks), mas
 # ══════════════════════════════════════════
 print_header "Homebrew — formulae"
-brew update &>/dev/null
-run_or_ok "All formulae up to date" brew upgrade
+if ! brew update &>/dev/null; then
+  echo "  ⚠ brew update failed (network down or VPN not connected?) — continuing with cached formulae"
+fi
+run_or_ok "All formulae up to date" brew upgrade || echo "  ⚠ brew upgrade failed — continuing"
 
 print_header "Homebrew — casks"
 _cask_log=$(mktemp)
@@ -178,16 +297,58 @@ rm -f "$_cask_log"
 if [[ ${#_stuck[@]} -gt 0 ]]; then
   echo ""
   echo "  ⚠ Stale install detected: ${_stuck[*]}"
-  echo -n "  Reinstall now? [y/N] "
-  read -k1 _ans; echo ""
-  if [[ "$_ans" == [yY] ]]; then
+  if ask_yn "Reinstall now?"; then
     for _cask in "${_stuck[@]}"; do
       brew reinstall --cask "$_cask"
     done
   fi
 fi
 
-brew cleanup &>/dev/null
+# brew cleanup — capture output so we can detect permission errors
+_cleanup_log=$(mktemp)
+brew cleanup &>"$_cleanup_log" || true
+
+_stuck_kegs=()
+_capture=0
+while IFS= read -r _line; do
+  if [[ "$_line" == "Error: Could not cleanup old kegs! Fix your permissions on:" ]]; then
+    _capture=1
+    continue
+  fi
+  if [[ "$_capture" == 1 ]]; then
+    if [[ "$_line" =~ ^[[:space:]]+(/.+)$ ]]; then
+      _stuck_kegs+=("${match[1]}")
+    else
+      _capture=0
+    fi
+  fi
+done < "$_cleanup_log"
+rm -f "$_cleanup_log"
+
+if [[ ${#_stuck_kegs[@]} -gt 0 ]]; then
+  echo ""
+  echo "  ⚠ Cleanup blocked by permission errors:"
+  for _k in "${_stuck_kegs[@]}"; do echo "    $_k"; done
+  if ask_yn "Remove these with sudo?"; then
+    for _k in "${_stuck_kegs[@]}"; do
+      sudo rm -rf "$_k"
+    done
+    brew cleanup &>/dev/null || true
+  fi
+fi
+
+print_header "MacPorts"
+if command -v port &>/dev/null; then
+  sudo port selfupdate &>/dev/null || echo "  ⚠ port selfupdate failed — continuing"
+  out=$(sudo port upgrade outdated 2>&1 || true)
+  if echo "$out" | grep -q "Nothing to upgrade"; then
+    echo "  ✓ All ports up to date"
+  else
+    echo "$out"
+  fi
+else
+  echo "  port not installed — skipping"
+fi
 
 print_header "Mac App Store"
 if command -v mas &>/dev/null; then
@@ -196,19 +357,20 @@ else
   echo "  mas not installed — skipping"
 fi
 
-print_header "macOS Software Update"
-run_or_ok "No updates available" sudo softwareupdate --install --all
-
 # ══════════════════════════════════════════
 #  3. CLI TOOLS
 #     npm, gem, rustup, pipx, claude
 # ══════════════════════════════════════════
 print_header "npm"
 if command -v npm &>/dev/null; then
-  outdated=$(npm outdated -g --parseable 2>/dev/null | wc -l | tr -d ' ')
+  # update npm itself first, then use the new npm to update global packages
+  _npm_before=$(npm --version 2>/dev/null)
+  npm install -g npm@latest &>/dev/null || true
+  _npm_after=$(npm --version 2>/dev/null)
+  [[ "$_npm_before" != "$_npm_after" ]] && echo "  npm: $_npm_before → $_npm_after"
+  outdated=$( { npm outdated -g --parseable 2>/dev/null || true; } | wc -l | tr -d ' ')
   if [[ "$outdated" -gt 0 ]]; then
     npm update -g
-    npm install -g npm@latest
   else
     echo "  ✓ All global packages up to date"
   fi
@@ -217,20 +379,30 @@ else
 fi
 
 print_header "Ruby gems"
-if command -v gem &>/dev/null; then
-  gem update --system &>/dev/null
-  out=$(gem update 2>&1)
+# Apple's system Ruby is frozen at an old version that rejects modern gems
+# → install + use Homebrew Ruby instead (keg-only, invoked by full path so PATH is irrelevant)
+if ! brew list --formula ruby &>/dev/null; then
+  echo "  Installing modern Ruby via Homebrew..."
+  brew install ruby || echo "  ✗ Failed to install ruby"
+fi
+_gem="$(brew --prefix ruby 2>/dev/null)/bin/gem"
+if [[ -x "$_gem" ]]; then
+  # update RubyGems itself first, then update installed gems with the new gem
+  "$_gem" update --system &>/dev/null || true
+  out=$("$_gem" update 2>&1 || true)
   if echo "$out" | grep -q "Nothing to update"; then
     echo "  ✓ All gems up to date"
   else
     echo "$out"
   fi
 else
-  echo "  gem not installed — skipping"
+  echo "  gem not available — skipping"
 fi
 
 print_header "Rust (rustup)"
 if command -v rustup &>/dev/null; then
+  # update rustup itself first (silent no-op if installed via brew — self-update disabled there)
+  rustup self update &>/dev/null || true
   rustup update
 else
   echo "  rustup not installed — skipping"
@@ -385,6 +557,50 @@ if electron_unmanaged:
         print(f'    • {e}')
 PYEOF
 
+# ══════════════════════════════════════════
+#  5. macOS SOFTWARE UPDATE
+#     Last so a reboot won't interrupt the rest
+# ══════════════════════════════════════════
+print_header "macOS Software Update"
+_su_log=$(mktemp)
+softwareupdate --list &>"$_su_log" || true
+
+_su_count=$(grep -c '^\* Label:' "$_su_log" 2>/dev/null || echo 0)
+
+if [[ "$_su_count" -eq 0 ]]; then
+  echo "  ✓ No updates available"
+else
+  # show only the relevant lines (skip "Software Update Tool" preamble)
+  grep -E '^\* Label:|^[[:space:]]+Title:' "$_su_log" | sed 's/^/  /'
+  echo ""
+  # detect if any of the available updates require a restart, BEFORE installing
+  _has_restart=$(grep -c 'Action: restart' "$_su_log" 2>/dev/null || echo 0)
+  if ask_yn "Install all $_su_count update(s)?"; then
+    sudo softwareupdate --install --all
+
+    if [[ "$_has_restart" -gt 0 ]]; then
+      echo ""
+      echo "  ℹ A macOS update has been staged — it will install on next restart."
+      if [[ -n "${UPDATER_GUI:-}" ]] || ! [[ -t 0 ]]; then
+        _ru_action=$(osascript \
+          -e 'tell application id "com.gunnar.update-all" to activate' \
+          -e 'button returned of (display dialog "A macOS update has been staged and will install on next restart." buttons {"Restart to install", "Show in System Settings", "Acknowledged"} default button "Acknowledged" cancel button "Acknowledged" with title "Update All" with icon note)' \
+          2>/dev/null || echo "")
+        echo "  → ${_ru_action:-cancelled}"
+        case "$_ru_action" in
+          "Restart to install")
+            osascript -e 'tell application "System Events" to restart' ;;
+          "Show in System Settings")
+            open "x-apple.systempreferences:com.apple.preferences.softwareupdate" ;;
+        esac
+      fi
+    fi
+  else
+    echo "  ⊘ Skipped"
+  fi
+fi
+rm -f "$_su_log"
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  All done."
+echo "  ✅ All done."

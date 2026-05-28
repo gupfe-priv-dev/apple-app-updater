@@ -6,9 +6,15 @@ APP="$DIR/UpdateAll.app"
 echo "Building UpdateAll.app..."
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/Resources"
 
 swiftc -o "$APP/Contents/MacOS/UpdateAll" "$DIR/UpdateAll.swift" \
     -framework AppKit -framework Foundation -O
+
+# bundle the shell scripts so the .app is self-contained
+cp "$DIR/update-all.sh" "$APP/Contents/Resources/"
+cp "$DIR/features.sh"   "$APP/Contents/Resources/"
+chmod +x "$APP/Contents/Resources/update-all.sh" "$APP/Contents/Resources/features.sh"
 
 cat > "$APP/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
