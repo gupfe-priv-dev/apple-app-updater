@@ -1,7 +1,26 @@
 #!/usr/bin/env zsh
-set -euo pipefail
+# -u catches typos in variable names; pipefail surfaces real exit codes when
+# we explicitly check $pipestatus. We deliberately DO NOT use `-e` — any
+# single tool failure (cask conflict, network blip, missing CLI) must print
+# a warning and continue, not kill the whole run. Each section is responsible
+# for its own failure messaging.
+set -uo pipefail
 
 export _SCRIPT_DIR="${0:A:h}"
+# State (registry) and cache (catalog) — kept OUT of the .app bundle so rebuilds
+# don't wipe them and writes don't break the bundle's code signature.
+export _STATE_DIR="${HOME}/Library/Application Support/UpdateAll"
+export _CACHE_DIR="${HOME}/Library/Caches/UpdateAll"
+mkdir -p "$_STATE_DIR" "$_CACHE_DIR"
+
+# Quieter brew output — disable hints, emoji, and (most importantly) the
+# spinner that uses ANSI cursor-up + clear-line escapes. Those don't render
+# in the .app's NSTextView (we'd see hundreds of stacked frames). Pair with
+# `--quiet` on individual brew calls to suppress the cask download progress bar.
+export HOMEBREW_NO_ENV_HINTS=1
+export HOMEBREW_NO_EMOJI=1
+export HOMEBREW_NO_AUTO_UPDATE=1     # we call `brew update` explicitly; skip implicit
+export HOMEBREW_NO_INSTALL_CLEANUP=1 # keep the run focused; cleanup is unrelated
 
 # colors — only when stdout is a TTY
 if [[ -t 1 ]]; then
@@ -58,6 +77,16 @@ run_or_ok() {
   rm -f "$tmp"
 }
 
+# Drop brew's cask download spinner frames. brew's Ruby tty-progressbar uses
+# ANSI cursor-up + clear-line escapes — which, once ANSI-stripped in the .app's
+# NSTextView, pile up as hundreds of "Cask X (Y) Downloading N.NMB/total" lines.
+# The frame lines are recognizable; brew's "==> …" headers and errors pass through.
+_brew_filter() {
+  grep --line-buffered -vE \
+    'Cask [a-zA-Z0-9_-]+ \([0-9][0-9.]*\)[[:space:]]+(Downloading|Downloaded|Verifying|Verified)' \
+    || true
+}
+
 printf "${C_HEADER}🔄 macOS Updater${C_RESET}\n"
 
 # ══════════════════════════════════════════
@@ -76,8 +105,17 @@ from pathlib import Path
 from collections import Counter
 
 SCRIPT_DIR = Path(os.environ['_SCRIPT_DIR'])
-REGISTRY   = SCRIPT_DIR / 'apps.json'
+STATE_DIR  = Path(os.environ['_STATE_DIR'])
+CACHE_DIR  = Path(os.environ['_CACHE_DIR'])
+REGISTRY   = STATE_DIR / 'apps.json'
 APPS_DIR   = Path('/Applications')
+
+# one-time migration: move apps.json out of any old script-relative location
+# (which on the .app build lived inside Contents/Resources/ and got wiped on rebuild)
+for _old in (SCRIPT_DIR / 'apps.json', SCRIPT_DIR.parent / 'apps.json'):
+    if _old.exists() and not REGISTRY.exists():
+        try: _old.rename(REGISTRY); print(f'  migrated apps.json → {REGISTRY}')
+        except Exception: pass
 
 def plist_get(plist, key):
     r = subprocess.run(['/usr/libexec/PlistBuddy', '-c', f'Print {key}', str(plist)],
@@ -85,17 +123,30 @@ def plist_get(plist, key):
     return r.stdout.strip() if r.returncode == 0 else None
 
 def get_brew_apps():
+    """Return app_name → cask_token for every locally-installed cask.
+    Reads both `app:` artifacts AND /Applications/*.app paths in `uninstall.delete`
+    so pkg-installer casks (adobe-acrobat-reader, microsoft-office, zoom, etc.)
+    are correctly recognized as 'managed' instead of staying in the unmanaged
+    registry and being re-offered every run."""
     casks = subprocess.run(['brew', 'list', '--cask'], capture_output=True, text=True).stdout.split()
     if not casks: return {}
     r = subprocess.run(['brew', 'info', '--cask', '--json=v2'] + casks, capture_output=True, text=True)
     result = {}
+    import os as _os
     try:
         for c in json.loads(r.stdout).get('casks', []):
-            for a in c.get('artifacts', []):
-                if isinstance(a, dict) and 'app' in a:
-                    for name in a['app']:
-                        if isinstance(name, str):
-                            result[name] = c['token']
+            token = c['token']
+            for art in c.get('artifacts', []):
+                if not isinstance(art, dict): continue
+                for name in art.get('app', []) or []:
+                    if isinstance(name, str): result[name] = token
+                for u in art.get('uninstall', []) or []:
+                    if not isinstance(u, dict): continue
+                    for path in u.get('delete', []) or []:
+                        if not isinstance(path, str): continue
+                        if not (path.startswith('/Applications/') and path.endswith('.app')): continue
+                        if '*' in path: continue
+                        result[_os.path.basename(path)] = token
     except Exception: pass
     return result
 
@@ -110,55 +161,126 @@ def get_mas_apps():
     return result
 
 def load_cask_catalog():
-    """Download (or reuse cached) full Homebrew cask catalog. Returns app_name→{token, version} dict."""
-    catalog_path = REGISTRY.parent / 'brew_cask_catalog_v2.json'
-    import time
-    # refresh if older than 24h
+    """Download (or reuse cached) full Homebrew cask catalog.
+    Returns app_name → list of {token, version} candidates.
+
+    Two sources of app names per cask:
+      1. `app:` artifact — drag-to-/Applications casks (e.g. libreoffice).
+      2. `uninstall.delete` paths matching /Applications/*.app — pkg-installer
+         casks (zoom, microsoft-office, adobe-acrobat-reader, onedrive, …).
+         Without (2) we'd miss most enterprise apps because they don't declare
+         an `app:` stanza."""
+    catalog_path = CACHE_DIR / 'brew_cask_catalog_v4.json'
+    import time, os, sys
     if catalog_path.exists() and time.time() - catalog_path.stat().st_mtime < 86400:
-        catalog = json.loads(catalog_path.read_text())
-    else:
-        r = subprocess.run(['curl', '-sf', 'https://formulae.brew.sh/api/cask.json'],
-                           capture_output=True, text=True)
-        if r.returncode != 0: return {}
-        casks = json.loads(r.stdout)
-        catalog = {}
-        for c in casks:
-            for art in c.get('artifacts', []):
-                if isinstance(art, dict) and 'app' in art:
-                    for app in art['app']:
-                        if isinstance(app, str):
-                            catalog[app.lower().removesuffix('.app')] = {
-                                'token': c['token'],
-                                'version': c.get('version', ''),
-                            }
-        catalog_path.write_text(json.dumps(catalog))
-        # remove orphaned old-format cache
-        old = REGISTRY.parent / 'brew_cask_catalog.json'
+        return json.loads(catalog_path.read_text())
+    print('  ⤓ Fetching Homebrew cask catalog (~15MB, cached for 24h)...', flush=True)
+    r = subprocess.run(['curl', '-sf', 'https://formulae.brew.sh/api/cask.json'],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print('    ✗ catalog fetch failed — continuing without cask suggestions')
+        return {}
+    casks = json.loads(r.stdout)
+    catalog = {}
+    for c in casks:
+        token, ver = c['token'], c.get('version', '')
+        apps_for_this = set()
+        for art in c.get('artifacts', []):
+            if not isinstance(art, dict): continue
+            # source 1: explicit app artifact
+            for a in art.get('app', []) or []:
+                if isinstance(a, str): apps_for_this.add(a)
+            # source 2: paths under /Applications removed by uninstall
+            for u in art.get('uninstall', []) or []:
+                if not isinstance(u, dict): continue
+                for path in u.get('delete', []) or []:
+                    if not isinstance(path, str): continue
+                    if not (path.startswith('/Applications/') and path.endswith('.app')): continue
+                    if '*' in path: continue   # wildcards aren't a real app name
+                    name = os.path.basename(path)
+                    if name: apps_for_this.add(name)
+        for a in apps_for_this:
+            catalog.setdefault(a.lower().removesuffix('.app'), []).append({
+                'token': token, 'version': ver,
+            })
+    catalog_path.write_text(json.dumps(catalog))
+    print(f'    ✓ catalog indexed: {len(catalog)} apps from {len(casks)} casks', flush=True)
+    # purge orphaned old-format / old-location caches
+    for old in (CACHE_DIR / 'brew_cask_catalog.json',
+                CACHE_DIR / 'brew_cask_catalog_v2.json',
+                CACHE_DIR / 'brew_cask_catalog_v3.json',
+                SCRIPT_DIR / 'brew_cask_catalog.json',
+                SCRIPT_DIR / 'brew_cask_catalog_v2.json'):
         if old.exists():
             try: old.unlink()
             except Exception: pass
     return catalog
 
 _cask_catalog = None
-def find_brew_cask(app_name):
-    """Find a brew cask that actually installs this app. Returns {token, version} dict or None."""
+def find_brew_cask(app_name, installed_version=None):
+    """Find the best-matching brew cask for this .app.
+    When multiple casks install the same .app, prefer the one whose major
+    version matches the installed major (e.g. LibreOffice 26.x → libreoffice,
+    not libreoffice-still 25.x). Returns {token, version} or None."""
     global _cask_catalog
     if _cask_catalog is None:
         _cask_catalog = load_cask_catalog()
-    return _cask_catalog.get(app_name.lower().removesuffix('.app'))
+    candidates = _cask_catalog.get(app_name.lower().removesuffix('.app'))
+    if not candidates: return None
+    if len(candidates) == 1: return candidates[0]
+    def major(s):
+        import re as _re
+        m = _re.match(r'(\d+)', s or '')
+        return int(m.group(1)) if m else -1
+    if installed_version:
+        iv_maj = major(installed_version)
+        same = [c for c in candidates if major(c.get('version', '')) == iv_maj]
+        if same: return same[0]
+    # fall back to candidate with highest major version
+    return max(candidates, key=lambda c: major(c.get('version', '')))
+
+import re as _re
+def _first_int(s):
+    m = _re.match(r'(\d+)', s or '')
+    return int(m.group(1)) if m else None
+
+def _sortv(a, b):
+    """sort -V comparison. 1 if a > b, -1 if a < b, 0 if equal."""
+    if a == b: return 0
+    r = subprocess.run(['bash', '-c', f'printf "%s\\n%s\\n" "{a}" "{b}" | sort -V | tail -1'],
+                       capture_output=True, text=True)
+    top = r.stdout.strip()
+    return 1 if top == a else (-1 if top == b else 0)
 
 def cmp_version(a, b):
-    """Return 1 if a > b, -1 if a < b, 0 if equal or undetermined."""
-    if not a or not b: return 0
+    """Return 1 if a > b, -1 if a < b, 0 if equal, None if structurally
+    incomparable. Handles Brave-style concatenations like '148.1.90.122'
+    (Chromium-major prefixed onto Brave's '1.90.122') by also trying the
+    version with its leading segment stripped before giving up."""
+    if not a or not b: return None
     a_clean = a.split(',')[0].split()[0]
     b_clean = b.split(',')[0].split()[0]
     if a_clean == b_clean: return 0
-    r = subprocess.run(['bash', '-c', f'printf "%s\\n%s\\n" "{a_clean}" "{b_clean}" | sort -V | tail -1'],
-                       capture_output=True, text=True)
-    top = r.stdout.strip()
-    if top == a_clean: return 1
-    if top == b_clean: return -1
-    return 0
+
+    fa, fb = _first_int(a_clean), _first_int(b_clean)
+    pairs = [(a_clean, b_clean)]
+    # If one side's leading int is an order of magnitude bigger than the
+    # other, it's probably a Chromium-style prefix concatenated onto the real
+    # version (Brave: "148.1.90.122" = chromium_major + "." + brave_version).
+    # Try stripping the leading segment from that side only.
+    if fa is not None and fb is not None:
+        if fa >= 10 * max(fb, 1) and '.' in a_clean:
+            pairs.append((a_clean.split('.', 1)[1], b_clean))
+        if fb >= 10 * max(fa, 1) and '.' in b_clean:
+            pairs.append((a_clean, b_clean.split('.', 1)[1]))
+
+    for ax, bx in pairs:
+        ma, mb = _first_int(ax), _first_int(bx)
+        if ma is None or mb is None: continue
+        hi, lo = max(ma, mb), max(min(ma, mb), 1)
+        if hi < 10 * lo:
+            return _sortv(ax, bx)
+    return None
 
 brew_managed = get_brew_apps()
 mas_managed  = get_mas_apps()
@@ -190,8 +312,10 @@ for name in sorted(unmanaged - set(registry)):
     else:
         entry = {'manager': 'unmanaged'}
 
-    # check if a brew cask exists for this app
-    cask = find_brew_cask(name)
+    # check if a brew cask exists for this app (pass installed version so we
+    # pick the right variant when multiple casks install the same .app)
+    installed_ver = plist_get(plist, 'CFBundleShortVersionString') if plist.exists() else ''
+    cask = find_brew_cask(name, installed_ver)
     if cask:
         entry['brew_cask_available'] = cask['token']
         brew_suggestions.append((name, cask['token']))
@@ -208,48 +332,115 @@ else:
 counts = Counter(e['manager'] for e in registry.values())
 print(f'  sparkle: {counts.get("sparkle",0)}  electron: {counts.get("electron",0)}  unmanaged: {counts.get("unmanaged",0)}')
 
+# Standing list of every unmanaged-by-brew/mas app, grouped by how it updates —
+# so the user knows at a glance which apps to keep an eye on manually.
+def _grouped(predicate):
+    return sorted(n[:-4] for n, e in registry.items() if predicate(e))
+_sparkle  = _grouped(lambda e: e['manager'] == 'sparkle')
+_electron = _grouped(lambda e: e['manager'] == 'electron')
+_brewable = _grouped(lambda e: e.get('brew_cask_available'))
+_orphan   = _grouped(lambda e: e['manager'] == 'unmanaged' and not e.get('brew_cask_available'))
+if _sparkle:
+    print(f'\n  Sparkle (self-update on launch):')
+    for n in _sparkle: print(f'    • {n}')
+if _electron:
+    print(f'\n  Electron (self-update on launch):')
+    for n in _electron: print(f'    • {n}')
+if _brewable:
+    print(f'\n  Brew cask available (offered below):')
+    for n in _brewable: print(f'    • {n}')
+if _orphan:
+    print(f'\n  Unmanaged — no auto-update detected (check manually):')
+    for n in _orphan: print(f'    • {n}')
+
 # categorize all brew-cask-available apps by version comparison
 safe = []       # brew >= installed (safe to install/upgrade)
 downgrade = []  # brew < installed (would downgrade, skip)
+mismatch = []   # versions look structurally incompatible (wrong cask or scheme)
 unknown = []    # missing version info on either side
 
 for n, e in registry.items():
-    if not e.get('brew_cask_available'): continue
-    token = e['brew_cask_available']
-    cask_info = find_brew_cask(n) or {}
-    brew_ver = cask_info.get('version', '')
     plist = APPS_DIR / n / 'Contents' / 'Info.plist'
     installed_ver = plist_get(plist, 'CFBundleShortVersionString') if plist.exists() else ''
+    # re-resolve every run: catches both stale entries (wrong cask) and
+    # apps that previously had no mapping but now match (e.g. after we
+    # taught the catalog to read uninstall.delete for pkg-style casks)
+    cask_info = find_brew_cask(n, installed_ver) or {}
+    new_token = cask_info.get('token')
+    cur_token = e.get('brew_cask_available')
+    if new_token != cur_token:
+        if new_token:
+            e['brew_cask_available'] = new_token; changed = True
+            verb = 'added' if not cur_token else 'updated'
+            print(f'  ⟳ cask mapping {verb}: {n[:-4]} → {new_token}')
+        elif cur_token:
+            del e['brew_cask_available']; changed = True
+            print(f'  ⟳ cask mapping removed: {n[:-4]} (was {cur_token})')
+    if not new_token: continue
+    token = new_token
+    brew_ver = cask_info.get('version', '')
     if not brew_ver or not installed_ver:
         unknown.append((n, token, brew_ver, installed_ver))
     else:
         c = cmp_version(brew_ver, installed_ver)
-        if c >= 0:
+        if c is None:
+            mismatch.append((n, token, brew_ver, installed_ver))
+        elif c >= 0:
             safe.append((n, token, brew_ver, installed_ver))
         else:
             downgrade.append((n, token, brew_ver, installed_ver))
 
 if safe:
     print(f'\n  💡 Brew cask available (safe — same or newer):')
+    # group by cask token — many apps can map to one cask (microsoft-office
+    # covers Excel, Word, OneNote, ...), so show one cask row with sub-bullets
+    by_token = {}
     for n, t, bv, iv in sorted(safe):
-        tag = f'{iv}' if bv == iv else f'{iv} → {bv}'
-        print(f'     {n[:-4]}  ({tag})  →  brew install --cask --force {t}')
+        by_token.setdefault(t, []).append((n, bv, iv))
+    for t in sorted(by_token):
+        items = by_token[t]
+        if len(items) == 1:
+            n, bv, iv = items[0]
+            tag = f'{iv}' if bv == iv else f'{iv} → {bv}'
+            print(f'     {n[:-4]}  ({tag})  →  brew install --cask --force {t}')
+        else:
+            print(f'     {t}  (bundle — covers {len(items)} apps)  →  brew install --cask --force {t}')
+            for n, bv, iv in items:
+                tag = f'{iv}' if bv == iv else f'{iv} → {bv}'
+                print(f'        • {n[:-4]}  ({tag})')
 
 if downgrade:
     print(f'\n  ⚠  Brew has older version (would downgrade — skipped):')
     for n, t, bv, iv in sorted(downgrade):
         print(f'     {n[:-4]}: installed {iv}, brew {bv}')
 
+if mismatch:
+    print(f'\n  ≠  Version schemes differ — different cask variant or product? (skipped):')
+    for n, t, bv, iv in sorted(mismatch):
+        print(f'     {n[:-4]}: installed {iv}, brew "{t}" reports {bv}')
+
 if unknown:
     print(f'\n  ?  Brew cask available (version unknown):')
     for n, t, bv, iv in sorted(unknown):
         print(f'     {n[:-4]}  →  brew install --cask --force {t}')
 
-# write safe-to-install cask tokens to tempfile for shell prompt
+if not (safe or downgrade or mismatch or unknown):
+    print(f'\n  ✓ No unmanaged apps have a matching brew cask — nothing to suggest')
+
+# persist any registry changes made during categorization (self-healed tokens)
+if changed:
+    REGISTRY.write_text(json.dumps(registry, indent=2, sort_keys=True))
+
+# write safe-to-install cask tokens (deduped, order preserved) to tempfile for
+# the shell loop. Without dedup, bundles like microsoft-office would be
+# installed once per app they cover.
 safe_file = os.environ.get('_BREW_SAFE_LIST', '')
 if safe_file and safe:
+    seen = set()
     with open(safe_file, 'w') as f:
         for n, t, bv, iv in safe:
+            if t in seen: continue
+            seen.add(t)
             f.write(t + '\n')
 PYEOF
 
@@ -261,8 +452,12 @@ if [[ -s "$_BREW_SAFE_LIST" ]]; then
     while IFS= read -r _cask; do
       [[ -z "$_cask" ]] && continue
       echo ""
-      echo "  → brew install --cask --force $_cask"
-      brew install --cask --force "$_cask" || echo "    ✗ install failed for $_cask"
+      echo "  → brew install --cask --force --quiet $_cask"
+      # `|| true` keeps `set -euo pipefail` from killing the loop on the very
+      # first cask conflict (e.g. onedrive vs microsoft-office); we recover
+      # the real brew exit code from $pipestatus[1] just below.
+      { brew install --cask --force --quiet "$_cask" 2>&1 | _brew_filter; } || true
+      [[ ${pipestatus[1]} -eq 0 ]] || echo "    ✗ install failed for $_cask (continuing)"
     done < "$_BREW_SAFE_LIST"
   else
     echo "  ⊘ Skipped"
@@ -279,11 +474,11 @@ print_header "Homebrew — formulae"
 if ! brew update &>/dev/null; then
   echo "  ⚠ brew update failed (network down or VPN not connected?) — continuing with cached formulae"
 fi
-run_or_ok "All formulae up to date" brew upgrade || echo "  ⚠ brew upgrade failed — continuing"
+run_or_ok "All formulae up to date" brew upgrade --quiet || echo "  ⚠ brew upgrade failed — continuing"
 
 print_header "Homebrew — casks"
 _cask_log=$(mktemp)
-{ brew upgrade --cask --greedy 2>&1 || true; } | tee "$_cask_log"
+{ brew upgrade --cask --greedy --quiet 2>&1 || true; } | _brew_filter | tee "$_cask_log"
 [[ -s "$_cask_log" ]] || echo "  ✓ All casks up to date"
 
 _stuck=()
@@ -439,8 +634,8 @@ from pathlib import Path
 from urllib.request import urlopen, Request
 import xml.etree.ElementTree as ET
 
-SCRIPT_DIR = Path(os.environ['_SCRIPT_DIR'])
-REGISTRY   = SCRIPT_DIR / 'apps.json'
+STATE_DIR  = Path(os.environ['_STATE_DIR'])
+REGISTRY   = STATE_DIR / 'apps.json'
 APPS_DIR   = Path('/Applications')
 
 def plist_get(plist, key):
@@ -528,10 +723,7 @@ def install_update(app_path, url, new_ver):
 
 registry = json.loads(REGISTRY.read_text()) if REGISTRY.exists() else {}
 
-electron_unmanaged = []
 for name, entry in sorted(registry.items()):
-    if entry['manager'] == 'electron':
-        electron_unmanaged.append(name); continue
     if entry['manager'] != 'sparkle': continue
 
     app_path      = APPS_DIR / name
@@ -551,10 +743,6 @@ for name, entry in sorted(registry.items()):
             registry[name]['last_version'] = latest_ver
             REGISTRY.write_text(json.dumps(registry, indent=2, sort_keys=True))
 
-if electron_unmanaged:
-    print('\n  Electron apps (self-update on launch):')
-    for e in electron_unmanaged:
-        print(f'    • {e}')
 PYEOF
 
 # ══════════════════════════════════════════
@@ -565,7 +753,7 @@ print_header "macOS Software Update"
 _su_log=$(mktemp)
 softwareupdate --list &>"$_su_log" || true
 
-_su_count=$(grep -c '^\* Label:' "$_su_log" 2>/dev/null || echo 0)
+_su_count=$(grep -c '^\* Label:' "$_su_log" 2>/dev/null) || _su_count=0
 
 if [[ "$_su_count" -eq 0 ]]; then
   echo "  ✓ No updates available"
@@ -574,7 +762,7 @@ else
   grep -E '^\* Label:|^[[:space:]]+Title:' "$_su_log" | sed 's/^/  /'
   echo ""
   # detect if any of the available updates require a restart, BEFORE installing
-  _has_restart=$(grep -c 'Action: restart' "$_su_log" 2>/dev/null || echo 0)
+  _has_restart=$(grep -c 'Action: restart' "$_su_log" 2>/dev/null) || _has_restart=0
   if ask_yn "Install all $_su_count update(s)?"; then
     sudo softwareupdate --install --all
 

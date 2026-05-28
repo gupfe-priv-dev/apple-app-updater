@@ -40,11 +40,13 @@ case "${1:-}" in
         [[ -f /etc/sudoers.d/update-all ]] && echo enabled || echo disabled
         ;;
       enable)
-        if [[ -f /etc/sudoers.d/update-all ]]; then
-          echo "already enabled"; exit 0
-        fi
+        # always overwrite — lets us re-run "enable" to upgrade the rule format
+        # (e.g. older installs that pre-date SETENV need refreshing)
         _tmp=$(mktemp)
-        printf '# Passwordless sudo for system update commands (update-all)\n%s ALL=(ALL) NOPASSWD: /usr/sbin/installer, /usr/sbin/softwareupdate\n' "$ME" > "$_tmp"
+        # SETENV is required because brew's cask installer calls sudo with
+        # -E and LOGNAME/USER env vars; without it the install fails with
+        # "sorry, you are not allowed to preserve the environment".
+        printf '# Passwordless sudo for system update commands (update-all)\n%s ALL=(ALL) NOPASSWD:SETENV: /usr/sbin/installer, /usr/sbin/softwareupdate\n' "$ME" > "$_tmp"
         visudo -c -f "$_tmp" || { echo "sudoers syntax error"; rm "$_tmp"; exit 1; }
         osascript -e "do shell script \"cp $_tmp /etc/sudoers.d/update-all && chmod 0440 /etc/sudoers.d/update-all\" with administrator privileges"
         rm "$_tmp"

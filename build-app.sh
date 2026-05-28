@@ -16,6 +16,12 @@ cp "$DIR/update-all.sh" "$APP/Contents/Resources/"
 cp "$DIR/features.sh"   "$APP/Contents/Resources/"
 chmod +x "$APP/Contents/Resources/update-all.sh" "$APP/Contents/Resources/features.sh"
 
+# regenerate icon if missing, then bundle
+if [[ ! -f "$DIR/AppIcon.icns" ]]; then
+    swift "$DIR/make-icon.swift" "$DIR"
+fi
+cp "$DIR/AppIcon.icns" "$APP/Contents/Resources/"
+
 cat > "$APP/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -25,6 +31,7 @@ cat > "$APP/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key><string>com.gunnar.update-all</string>
     <key>CFBundleName</key><string>Update All</string>
     <key>CFBundleVersion</key><string>1.0</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHighResolutionCapable</key><true/>
 </dict>

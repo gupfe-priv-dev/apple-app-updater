@@ -124,18 +124,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             defer: false
         )
         window.title = "Update All"
-        window.backgroundColor = .black
+        // window background = mid-dark gray so the textView (much darker) reads
+        // as a framed inner pane instead of bleeding to the window edges
+        window.backgroundColor = NSColor(calibratedWhite: 0.22, alpha: 1)
         window.center()
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
-        scroll.borderType = .noBorder
+        scroll.borderType = .lineBorder
 
         textView = NSTextView()
         textView.isEditable = false
-        textView.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1)
+        textView.backgroundColor = NSColor(calibratedWhite: 0.06, alpha: 1)
         textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.textContainerInset = NSSize(width: 10, height: 10)
         textView.autoresizingMask = .width
@@ -159,10 +161,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         content.addSubview(abortButton)
 
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: content.topAnchor),
-            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: closeButton.topAnchor, constant: -8),
+            scroll.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
+            scroll.bottomAnchor.constraint(equalTo: closeButton.topAnchor, constant: -10),
             closeButton.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             closeButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
             closeButton.widthAnchor.constraint(equalToConstant: 120),
@@ -215,7 +217,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         env["TERM"] = "xterm-256color"
         env["COLUMNS"] = "110"
         env["LINES"] = "40"
-        env["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        let home = NSHomeDirectory()
+        env["PATH"] = "\(home)/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         env["UPDATER_GUI"] = "1"   // tells ask_yn in the script to use osascript dialogs
         proc.environment = env
 
@@ -231,6 +234,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         proc.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
+                self?.heartbeat?.invalidate()
+                self?.heartbeat = nil
+                self?.eraseSpinner()
                 // distinguish from the script's own "✅ All done" — this only matters
                 // if the script died abnormally (non-zero exit) or was aborted
                 if proc.terminationStatus != 0 {
@@ -243,12 +249,73 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         runningProcess = proc
         try? proc.run()
+
+        // tick once per second to refresh the heartbeat spinner
+        heartbeat = Timer.scheduledTimer(timeInterval: 1.0, target: self,
+                                         selector: #selector(tickHeartbeat),
+                                         userInfo: nil, repeats: true)
+    }
+
+    @objc func tickHeartbeat() {
+        guard let proc = runningProcess, proc.isRunning else {
+            eraseSpinner()
+            return
+        }
+        guard let storage = textView.textStorage else { return }
+        // only render the spinner at a clean line boundary; don't trample a
+        // partial line in progress (e.g. a \r-style progress update mid-flight)
+        let atBoundary = storage.length == lineStartLen
+        let idle = Date().timeIntervalSince(lastOutputAt)
+        if !spinnerVisible {
+            guard idle >= 2.0, atBoundary else { return }
+            spinnerVisible = true
+            spinnerStartedAt = Date()
+        }
+        let secs = Int(Date().timeIntervalSince(spinnerStartedAt))
+        let glyph = Self.spinnerGlyphs[secs % Self.spinnerGlyphs.count]
+        // erase prior spinner frame and redraw
+        if storage.length > lineStartLen {
+            storage.deleteCharacters(in: NSRange(location: lineStartLen,
+                                                 length: storage.length - lineStartLen))
+        }
+        let attrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor(calibratedWhite: 0.55, alpha: 1),
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+        ]
+        storage.append(NSAttributedString(string: "  \(glyph) still working… \(secs)s",
+                                          attributes: attrs))
+        textView.scrollToEndOfDocument(nil)
+    }
+
+    private func eraseSpinner() {
+        guard spinnerVisible, let storage = textView.textStorage else { return }
+        if storage.length > lineStartLen {
+            storage.deleteCharacters(in: NSRange(location: lineStartLen,
+                                                 length: storage.length - lineStartLen))
+        }
+        spinnerVisible = false
     }
 
     // strip ANSI escape codes
     private static let ansi = try! NSRegularExpression(pattern: "\u{1b}\\[[0-9;]*[mGKHFABCDJsu]")
 
     private var logHandle: FileHandle?
+    // position in textStorage where the current (in-progress) line begins —
+    // used to overwrite that range when we see a CR (`\r`) from terminal-style
+    // progress redraws (Homebrew downloads, etc.)
+    private var lineStartLen: Int = 0
+    // current-line buffer for the log: only committed lines (post-\n) get
+    // written, so the log keeps a clean record without hundreds of progress ticks
+    private var pendingLogLine: String = ""
+
+    // "still alive" spinner — shown as a ghost line after 2s of subprocess
+    // silence (e.g. while pkg installer is unpacking). Erased the moment any
+    // real output arrives or the process exits. Not written to the log.
+    private var lastOutputAt: Date = Date()
+    private var spinnerVisible: Bool = false
+    private var spinnerStartedAt: Date = Date()
+    private var heartbeat: Timer?
+    private static let spinnerGlyphs = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
     func openLog() {
         let dir = NSHomeDirectory() + "/Library/Logs"
@@ -264,22 +331,58 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         logHandle?.write(header.data(using: .utf8)!)
     }
 
+    private static let textAttrs: [NSAttributedString.Key: Any] = [
+        .foregroundColor: NSColor(calibratedWhite: 0.85, alpha: 1),
+        .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+    ]
+
     func append(_ raw: String) {
-        let clean = Self.ansi.stringByReplacingMatches(
+        // any real output → clear the heartbeat spinner and reset its clock
+        eraseSpinner()
+        lastOutputAt = Date()
+
+        let cleaned = Self.ansi.stringByReplacingMatches(
             in: raw, range: NSRange(raw.startIndex..., in: raw), withTemplate: "")
             .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: "\u{04}", with: "")   // strip PTY EOF control char
-            .replacingOccurrences(of: "^D", with: "")       // strip PTY EOF display form
-        let attrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor(calibratedWhite: 0.85, alpha: 1),
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
-        ]
-        textView.textStorage?.append(NSAttributedString(string: clean, attributes: attrs))
-        textView.scrollToEndOfDocument(nil)
-        if let data = clean.data(using: .utf8) {
-            logHandle?.write(data)
+            .replacingOccurrences(of: "\u{04}", with: "")   // PTY EOF control char
+            .replacingOccurrences(of: "^D", with: "")       // PTY EOF display form
+        guard let storage = textView.textStorage else { return }
+
+        var i = cleaned.startIndex
+        while i < cleaned.endIndex {
+            let ch = cleaned[i]
+            switch ch {
+            case "\r":
+                // overwrite: erase visible content of current line in the UI
+                if storage.length > lineStartLen {
+                    storage.deleteCharacters(in: NSRange(
+                        location: lineStartLen,
+                        length: storage.length - lineStartLen))
+                }
+                pendingLogLine = ""
+                i = cleaned.index(after: i)
+            case "\n":
+                storage.append(NSAttributedString(string: "\n", attributes: Self.textAttrs))
+                pendingLogLine.append("\n")
+                if let data = pendingLogLine.data(using: .utf8) {
+                    logHandle?.write(data)
+                }
+                pendingLogLine = ""
+                lineStartLen = storage.length
+                i = cleaned.index(after: i)
+            default:
+                // batch consecutive non-CR/non-LF chars into one append
+                var j = i
+                while j < cleaned.endIndex, cleaned[j] != "\r", cleaned[j] != "\n" {
+                    j = cleaned.index(after: j)
+                }
+                let chunk = String(cleaned[i..<j])
+                storage.append(NSAttributedString(string: chunk, attributes: Self.textAttrs))
+                pendingLogLine.append(chunk)
+                i = j
+            }
         }
+        textView.scrollToEndOfDocument(nil)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
