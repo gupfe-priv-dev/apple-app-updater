@@ -508,43 +508,75 @@ try:
                     if isinstance(p, str) and p.startswith('/Applications/') \
                        and p.endswith('.app') and '*' not in p:
                         seen.add(os.path.basename(p))
-        for a in seen:
-            print(f'{token}\t{a}')
+        if seen:
+            print(token + '\t' + ','.join(sorted(seen)))
 except Exception: pass
 ") || true
   [[ -z "$_map" ]] && return
-  # Collect missing-target casks first — DON'T auto-reinstall. The user may
-  # have removed the app deliberately (manual trash) and the cask metadata is
-  # just stale; reinstalling would resurrect something they meant gone.
-  local _missing=()
-  typeset -A _seen
-  while IFS=$'\t' read -r _token _app; do
-    [[ -z "$_token" || -z "$_app" ]] && continue
-    [[ -n "${_seen[$_token]:-}" ]] && continue
-    local _target="/Applications/$_app"
-    if [[ ! -d "$_target/Contents/MacOS" ]]; then
-      _seen[$_token]=1
-      _missing+=("$_token|$_app")
+
+  # Classify each cask:
+  #   total   — every app it installs is missing → bundle broken (interrupted
+  #             install, crash, etc.) → offer reinstall.
+  #   partial — some of its apps missing, others present → user clearly
+  #             removed specific apps from a bundle cask (e.g. Microsoft
+  #             Defender from microsoft-office). Silent skip; reinstalling
+  #             the whole bundle would clobber the current versions of the
+  #             other apps and resurrect what the user removed — exactly the
+  #             surprise we want to avoid.
+  local _missing_total=()
+  local _partial=()
+  while IFS=$'\t' read -r _token _csv; do
+    [[ -z "$_token" || -z "$_csv" ]] && continue
+    # zsh-native split — `read -A` here was noisily echoing `_apps=(...)`
+    # for every iteration. (s:,:) splits on commas without that side effect.
+    local _apps=("${(@s:,:)_csv}")
+    local _missing_list="" _present_list=""
+    for _app in "${_apps[@]}"; do
+      if [[ -d "/Applications/$_app/Contents/MacOS" ]]; then
+        _present_list+="${_present_list:+, }$_app"
+      else
+        _missing_list+="${_missing_list:+, }$_app"
+      fi
+    done
+    if [[ -n "$_missing_list" && -z "$_present_list" ]]; then
+      _missing_total+=("$_token|$_csv")
+    elif [[ -n "$_missing_list" ]]; then
+      _partial+=("$_token|$_missing_list|$_present_list")
     fi
   done <<< "$_map"
-  [[ ${#_missing[@]} -eq 0 ]] && return
+
+  if (( ${#_partial[@]} > 0 )); then
+    echo "  ℹ Cask bundles with SOME apps removed (treating as deliberate, not reinstalling):"
+    for _entry in "${_partial[@]}"; do
+      local _t _m _p
+      IFS='|' read -r _t _m _p <<< "$_entry"
+      echo "     • $_t"
+      echo "       missing: $_m"
+      echo "       present: $_p"
+      echo "       to drop brew's tracking:        brew uninstall --cask $_t"
+      echo "       to bring all missing apps back: brew reinstall --cask --force $_t"
+    done
+  fi
+
+  (( ${#_missing_total[@]} == 0 )) && return
+
   echo ""
-  echo "  ⚠ Cask-managed apps missing from /Applications:"
-  for _entry in "${_missing[@]}"; do
-    IFS='|' read -r _token _app <<< "$_entry"
-    echo "     • $_app  (brew cask: $_token)"
+  echo "  ⚠ Cask bundles with ALL apps missing from /Applications:"
+  for _entry in "${_missing_total[@]}"; do
+    IFS='|' read -r _token _csv <<< "$_entry"
+    echo "     • $_token  ($_csv)"
   done
   echo ""
-  echo "    If you removed these on purpose: run \`brew uninstall --cask <token>\` to drop brew's tracking."
-  echo "    Otherwise we can re-fetch from upstream now."
-  if ask_yn "Reinstall the ${#_missing[@]} missing cask(s)?"; then
-    for _entry in "${_missing[@]}"; do
-      IFS='|' read -r _token _app <<< "$_entry"
+  echo "    Likely an interrupted install. Reinstall re-fetches the bundle from upstream."
+  echo "    If removal was deliberate: \`brew uninstall --cask <token>\`"
+  if ask_yn "Reinstall the ${#_missing_total[@]} cask(s)?"; then
+    for _entry in "${_missing_total[@]}"; do
+      IFS='|' read -r _token _csv <<< "$_entry"
       echo "  ↻ brew reinstall --cask $_token"
       brew reinstall --cask --force --quiet "$_token" 2>&1 | _brew_filter || true
     done
   else
-    echo "  ⊘ Skipped — brew metadata still references the removed app(s)."
+    echo "  ⊘ Skipped — brew metadata still references the missing bundle(s)."
   fi
 }
 _restore_drifted_casks
