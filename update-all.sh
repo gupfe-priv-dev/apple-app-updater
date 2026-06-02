@@ -77,6 +77,19 @@ run_or_ok() {
   rm -f "$tmp"
 }
 
+# Returns 0 (true) if this section is in $UPDATER_SKIP_SECTIONS — the launching
+# app set this when the most recent scan determined the section's tool wasn't
+# installed. The caller should bail out without emitting print_header / doing
+# any work, so the sidebar's "skipped" state stays visible instead of cycling
+# through "active" → "skipped" for a few ms per absent tool.
+_skip_section() {
+  [[ -z "${UPDATER_SKIP_SECTIONS:-}" ]] && return 1
+  case ",${UPDATER_SKIP_SECTIONS}," in
+    *,"$1",*) return 0 ;;
+    *)        return 1 ;;
+  esac
+}
+
 # Drop brew's cask download spinner frames. brew's Ruby tty-progressbar uses
 # ANSI cursor-up + clear-line escapes — which, once ANSI-stripped in the .app's
 # NSTextView, pile up as hundreds of "Cask X (Y) Downloading N.NMB/total" lines.
@@ -116,6 +129,14 @@ for _old in (SCRIPT_DIR / 'apps.json', SCRIPT_DIR.parent / 'apps.json'):
     if _old.exists() and not REGISTRY.exists():
         try: _old.rename(REGISTRY); print(f'  migrated apps.json → {REGISTRY}')
         except Exception: pass
+
+# Tokens the user said "No" to in a previous safe-bucket prompt — we keep
+# them out of future suggestions until the user clears the file.
+DECLINED_FILE = STATE_DIR / 'declined-casks.json'
+declined_casks = set()
+if DECLINED_FILE.exists():
+    try: declined_casks = set(json.loads(DECLINED_FILE.read_text()))
+    except Exception: pass
 
 def plist_get(plist, key):
     r = subprocess.run(['/usr/libexec/PlistBuddy', '-c', f'Print {key}', str(plist)],
@@ -378,6 +399,7 @@ for n, e in registry.items():
             print(f'  ⟳ cask mapping removed: {n[:-4]} (was {cur_token})')
     if not new_token: continue
     token = new_token
+    if token in declined_casks: continue   # user previously said No to this cask
     brew_ver = cask_info.get('version', '')
     if not brew_ver or not installed_ver:
         unknown.append((n, token, brew_ver, installed_ver))
@@ -444,23 +466,54 @@ if safe_file and safe:
             f.write(t + '\n')
 PYEOF
 
-# Offer to install the safe brew casks
+# Offer to install the safe brew casks via a multi-select. Anything the user
+# UNTICKS (i.e. has visible in the list but excludes from selection) goes
+# into the persistent decline file so we don't re-offer it next run. Cancel
+# = skip the whole prompt, no persistence, ask again next time.
 if [[ -s "$_BREW_SAFE_LIST" ]]; then
-  _safe_n=$(wc -l < "$_BREW_SAFE_LIST" | tr -d ' ')
-  echo ""
-  if ask_yn "Install all $_safe_n safe brew cask(s) now?"; then
-    while IFS= read -r _cask; do
-      [[ -z "$_cask" ]] && continue
-      echo ""
-      echo "  → brew install --cask --force --quiet $_cask"
-      # `|| true` keeps `set -uo pipefail` from killing the loop on the very
-      # first cask conflict (e.g. onedrive vs microsoft-office); we recover
-      # the real brew exit code from $pipestatus[1] just below.
-      { brew install --cask --force --quiet "$_cask" 2>&1 | _brew_filter; } || true
-      [[ ${pipestatus[1]} -eq 0 ]] || echo "    ✗ install failed for $_cask (continuing)"
-    done < "$_BREW_SAFE_LIST"
-  else
-    echo "  ⊘ Skipped"
+  _to_install=()
+  _to_decline=()
+  # Per-cask Yes/No. AppleScript's `choose from list` was visually ambiguous
+  # (no checkbox glyphs; single highlight only) and gave no way to tell
+  # selected vs unselected at a glance. ask_yn is unambiguous in both GUI
+  # and terminal. "No" persists as a decline so we don't re-ask next run.
+  while IFS= read -r _t; do
+    [[ -z "$_t" ]] && continue
+    if ask_yn "Install $_t? (No = don't offer it again)"; then
+      _to_install+=("$_t")
+    else
+      _to_decline+=("$_t")
+    fi
+  done < "$_BREW_SAFE_LIST"
+
+  for _cask in "${_to_install[@]}"; do
+    echo ""
+    echo "  → brew install --cask --force --quiet $_cask"
+    # `|| true` keeps `set -uo pipefail` from killing the loop on the very
+    # first cask conflict; we recover the real brew exit code below.
+    { brew install --cask --force --quiet "$_cask" 2>&1 | _brew_filter; } || true
+    [[ ${pipestatus[1]} -eq 0 ]] || echo "    ✗ install failed for $_cask (continuing)"
+  done
+
+  if (( ${#_to_decline[@]} > 0 )); then
+    _decline_tmp=$(mktemp)
+    printf '%s\n' "${_to_decline[@]}" > "$_decline_tmp"
+    DECLINE_INPUT="$_decline_tmp" python3 - <<'PYEOF'
+import json, os
+from pathlib import Path
+declined_path = Path(os.environ['_STATE_DIR']) / 'declined-casks.json'
+existing = set()
+if declined_path.exists():
+    try: existing = set(json.loads(declined_path.read_text()))
+    except Exception: pass
+with open(os.environ['DECLINE_INPUT']) as f:
+    new = {ln.strip() for ln in f if ln.strip()}
+existing |= new
+declined_path.write_text(json.dumps(sorted(existing), indent=2))
+print(f"  ↳ Won't re-offer: {', '.join(sorted(new))}")
+print(f"     Reset: rm \"{declined_path}\"")
+PYEOF
+    rm -f "$_decline_tmp"
   fi
 fi
 rm -f "$_BREW_SAFE_LIST"
@@ -651,99 +704,108 @@ if [[ ${#_stuck_kegs[@]} -gt 0 ]]; then
   fi
 fi
 
-print_header "MacPorts"
-if command -v port &>/dev/null; then
-  sudo port selfupdate &>/dev/null || echo "  ⚠ port selfupdate failed — continuing"
-  out=$(sudo port upgrade outdated 2>&1 || true)
-  if echo "$out" | grep -q "Nothing to upgrade"; then
-    echo "  ✓ All ports up to date"
+if ! _skip_section "MacPorts"; then
+  print_header "MacPorts"
+  if command -v port &>/dev/null; then
+    sudo port selfupdate &>/dev/null || echo "  ⚠ port selfupdate failed — continuing"
+    out=$(sudo port upgrade outdated 2>&1 || true)
+    if echo "$out" | grep -q "Nothing to upgrade"; then
+      echo "  ✓ All ports up to date"
+    else
+      echo "$out"
+    fi
   else
-    echo "$out"
+    echo "  port not installed — skipping"
   fi
-else
-  echo "  port not installed — skipping"
 fi
 
-print_header "Mac App Store"
-if command -v mas &>/dev/null; then
-  run_or_ok "All App Store apps up to date" mas upgrade
-else
-  echo "  mas not installed — skipping"
+if ! _skip_section "Mac App Store"; then
+  print_header "Mac App Store"
+  if command -v mas &>/dev/null; then
+    run_or_ok "All App Store apps up to date" mas upgrade
+  else
+    echo "  mas not installed — skipping"
+  fi
 fi
 
 # ══════════════════════════════════════════
 #  3. CLI TOOLS
 #     npm, gem, rustup, pipx, claude
 # ══════════════════════════════════════════
-print_header "npm"
-if command -v npm &>/dev/null; then
-  # update npm itself first, then use the new npm to update global packages
-  _npm_before=$(npm --version 2>/dev/null)
-  npm install -g npm@latest &>/dev/null || true
-  _npm_after=$(npm --version 2>/dev/null)
-  [[ "$_npm_before" != "$_npm_after" ]] && echo "  npm: $_npm_before → $_npm_after"
-  outdated=$( { npm outdated -g --parseable 2>/dev/null || true; } | wc -l | tr -d ' ')
-  if [[ "$outdated" -gt 0 ]]; then
-    npm update -g
+if ! _skip_section "npm"; then
+  print_header "npm"
+  if command -v npm &>/dev/null; then
+    # update npm itself first, then use the new npm to update global packages
+    _npm_before=$(npm --version 2>/dev/null)
+    npm install -g npm@latest &>/dev/null || true
+    _npm_after=$(npm --version 2>/dev/null)
+    [[ "$_npm_before" != "$_npm_after" ]] && echo "  npm: $_npm_before → $_npm_after"
+    outdated=$( { npm outdated -g --parseable 2>/dev/null || true; } | wc -l | tr -d ' ')
+    if [[ "$outdated" -gt 0 ]]; then
+      npm update -g
+    else
+      echo "  ✓ All global packages up to date"
+    fi
   else
-    echo "  ✓ All global packages up to date"
+    echo "  npm not installed — skipping"
   fi
-else
-  echo "  npm not installed — skipping"
 fi
 
-print_header "Ruby gems"
-# Apple's system Ruby is frozen at an old version that rejects modern gems
-# → install + use Homebrew Ruby instead (keg-only, invoked by full path so PATH is irrelevant)
-if ! brew list --formula ruby &>/dev/null; then
-  echo "  Installing modern Ruby via Homebrew..."
-  brew install ruby || echo "  ✗ Failed to install ruby"
-fi
-_gem="$(brew --prefix ruby 2>/dev/null)/bin/gem"
-if [[ -x "$_gem" ]]; then
-  # update RubyGems itself first, then update installed gems with the new gem
-  "$_gem" update --system &>/dev/null || true
-  # Filter Ruby's "already initialized constant" + "previous definition of"
-  # warnings — they happen when brew's gem path picks up two rdoc versions
-  # at once (old Cellar gem + new symlinked gem). Harmless but very noisy.
-  out=$("$_gem" update 2>&1 \
-        | grep -vE 'warning: (already initialized constant|previous definition of)' \
-        || true)
-  if [[ -z "$out" ]] || echo "$out" | grep -q "Nothing to update"; then
-    echo "  ✓ All gems up to date"
+if ! _skip_section "Ruby gems"; then
+  print_header "Ruby gems"
+  # Apple's system Ruby is frozen at an old version that rejects modern gems
+  # → install + use Homebrew Ruby instead (keg-only, invoked by full path so PATH is irrelevant)
+  if ! brew list --formula ruby &>/dev/null; then
+    echo "  Installing modern Ruby via Homebrew..."
+    brew install ruby || echo "  ✗ Failed to install ruby"
+  fi
+  _gem="$(brew --prefix ruby 2>/dev/null)/bin/gem"
+  if [[ -x "$_gem" ]]; then
+    "$_gem" update --system &>/dev/null || true
+    out=$("$_gem" update 2>&1 \
+          | grep -vE 'warning: (already initialized constant|previous definition of)' \
+          || true)
+    if [[ -z "$out" ]] || echo "$out" | grep -q "Nothing to update"; then
+      echo "  ✓ All gems up to date"
+    else
+      echo "$out"
+    fi
   else
-    echo "$out"
+    echo "  gem not available — skipping"
   fi
-else
-  echo "  gem not available — skipping"
 fi
 
-print_header "Rust (rustup)"
-if command -v rustup &>/dev/null; then
-  # update rustup itself first (silent no-op if installed via brew — self-update disabled there)
-  rustup self update &>/dev/null || true
-  rustup update
-else
-  echo "  rustup not installed — skipping"
-fi
-
-print_header "pipx"
-if command -v pipx &>/dev/null; then
-  run_or_ok "All pipx packages up to date" pipx upgrade-all
-else
-  echo "  pipx not installed — skipping"
-fi
-
-print_header "Claude Code"
-if command -v claude &>/dev/null; then
-  out=$(claude update 2>&1)
-  if echo "$out" | grep -q "up to date"; then
-    echo "  ✓ $(echo "$out" | grep -o 'Claude Code is up to date.*')"
+if ! _skip_section "Rust (rustup)"; then
+  print_header "Rust (rustup)"
+  if command -v rustup &>/dev/null; then
+    rustup self update &>/dev/null || true
+    rustup update
   else
-    echo "$out"
+    echo "  rustup not installed — skipping"
   fi
-else
-  echo "  claude not installed — skipping"
+fi
+
+if ! _skip_section "pipx"; then
+  print_header "pipx"
+  if command -v pipx &>/dev/null; then
+    run_or_ok "All pipx packages up to date" pipx upgrade-all
+  else
+    echo "  pipx not installed — skipping"
+  fi
+fi
+
+if ! _skip_section "Claude Code"; then
+  print_header "Claude Code"
+  if command -v claude &>/dev/null; then
+    out=$(claude update 2>&1)
+    if echo "$out" | grep -q "up to date"; then
+      echo "  ✓ $(echo "$out" | grep -o 'Claude Code is up to date.*')"
+    else
+      echo "$out"
+    fi
+  else
+    echo "  claude not installed — skipping"
+  fi
 fi
 
 # ══════════════════════════════════════════

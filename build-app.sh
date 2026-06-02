@@ -38,9 +38,12 @@ lipo -create \
 rm "$APP/Contents/MacOS/UpdateAll.x86_64" "$APP/Contents/MacOS/UpdateAll.arm64"
 
 # bundle the shell scripts so the .app is self-contained
-cp "$DIR/update-all.sh" "$APP/Contents/Resources/"
-cp "$DIR/features.sh"   "$APP/Contents/Resources/"
-chmod +x "$APP/Contents/Resources/update-all.sh" "$APP/Contents/Resources/features.sh"
+cp "$DIR/update-all.sh"      "$APP/Contents/Resources/"
+cp "$DIR/update-all-scan.sh" "$APP/Contents/Resources/"
+cp "$DIR/features.sh"        "$APP/Contents/Resources/"
+chmod +x "$APP/Contents/Resources/update-all.sh" \
+         "$APP/Contents/Resources/update-all-scan.sh" \
+         "$APP/Contents/Resources/features.sh"
 
 # regenerate icon if missing, then bundle
 if [[ ! -f "$DIR/AppIcon.icns" ]]; then
