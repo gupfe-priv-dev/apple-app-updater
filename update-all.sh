@@ -477,6 +477,64 @@ fi
 run_or_ok "All formulae up to date" brew upgrade --quiet || echo "  ⚠ brew upgrade failed — continuing"
 
 print_header "Homebrew — casks"
+
+# Drift recovery: brew's Caskroom "backup" turns into a symlink back to
+# /Applications/<App>.app once an install succeeds — so if a prior run was
+# interrupted between `rm /Applications/X.app` and the copy-in (SIGINT,
+# crash, network drop), there's no real backup to restore from and brew's
+# own metadata still thinks the cask is installed. Fix: for each known cask
+# whose /Applications target is missing or has no Contents/MacOS, run
+# `brew reinstall --cask --force` so brew re-fetches from upstream.
+_restore_drifted_casks() {
+  local _casks=$(brew list --cask 2>/dev/null)
+  [[ -z "$_casks" ]] && return
+  # cask token + every /Applications/*.app it installs (both `app:` and
+  # uninstall.delete paths so pkg-style casks like brave-browser, zoom, etc.
+  # are covered).
+  local _map
+  _map=$(echo "$_casks" | xargs brew info --cask --json=v2 2>/dev/null | python3 -c "
+import json, sys, os
+try:
+    d = json.load(sys.stdin)
+    for c in d.get('casks', []):
+        token = c['token']; seen = set()
+        for art in c.get('artifacts', []):
+            if not isinstance(art, dict): continue
+            for n in art.get('app', []) or []:
+                if isinstance(n, str): seen.add(n)
+            for u in art.get('uninstall', []) or []:
+                if not isinstance(u, dict): continue
+                for p in u.get('delete', []) or []:
+                    if isinstance(p, str) and p.startswith('/Applications/') \
+                       and p.endswith('.app') and '*' not in p:
+                        seen.add(os.path.basename(p))
+        for a in seen:
+            print(f'{token}\t{a}')
+except Exception: pass
+") || true
+  [[ -z "$_map" ]] && return
+  local recovered=0
+  typeset -A _seen
+  while IFS=$'\t' read -r _token _app; do
+    [[ -z "$_token" || -z "$_app" ]] && continue
+    [[ -n "${_seen[$_token]:-}" ]] && continue
+    local _target="/Applications/$_app"
+    if [[ ! -d "$_target/Contents/MacOS" ]]; then
+      _seen[$_token]=1
+      echo "  ↻ $_app is missing or empty — brew reinstall --cask $_token"
+      brew reinstall --cask --force --quiet "$_token" 2>&1 | _brew_filter || true
+      if [[ -d "$_target/Contents/MacOS" ]]; then
+        recovered=$((recovered + 1))
+        echo "    ✓ recovered"
+      else
+        echo "    ✗ reinstall did not produce $_app"
+      fi
+    fi
+  done <<< "$_map"
+  [[ $recovered -gt 0 ]] && echo "  ↻ Recovered $recovered cask app(s) via brew reinstall"
+}
+_restore_drifted_casks
+
 _cask_log=$(mktemp)
 { brew upgrade --cask --greedy --quiet 2>&1 || true; } | _brew_filter | tee "$_cask_log"
 [[ -s "$_cask_log" ]] || echo "  ✓ All casks up to date"
