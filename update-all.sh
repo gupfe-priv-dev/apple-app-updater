@@ -584,8 +584,13 @@ _gem="$(brew --prefix ruby 2>/dev/null)/bin/gem"
 if [[ -x "$_gem" ]]; then
   # update RubyGems itself first, then update installed gems with the new gem
   "$_gem" update --system &>/dev/null || true
-  out=$("$_gem" update 2>&1 || true)
-  if echo "$out" | grep -q "Nothing to update"; then
+  # Filter Ruby's "already initialized constant" + "previous definition of"
+  # warnings — they happen when brew's gem path picks up two rdoc versions
+  # at once (old Cellar gem + new symlinked gem). Harmless but very noisy.
+  out=$("$_gem" update 2>&1 \
+        | grep -vE 'warning: (already initialized constant|previous definition of)' \
+        || true)
+  if [[ -z "$out" ]] || echo "$out" | grep -q "Nothing to update"; then
     echo "  ✓ All gems up to date"
   else
     echo "$out"
