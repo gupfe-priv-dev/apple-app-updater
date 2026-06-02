@@ -1,15 +1,27 @@
 name: Release
 
 # Manually-triggered build + release pipeline.
-# Go to Actions → Release → Run workflow → enter tag (e.g. v1.2.0) → optional notes.
-# Only people with write access to the repo can trigger this — so for a
-# personal/private repo, that's just the owner.
+# Go to Actions → Release → Run workflow → pick patch/minor/major → optional notes.
+# The tag is auto-computed from the highest existing semver tag; provide
+# `tag_override` only when you need something off the increment line
+# (e.g. v2.0.0-rc1). Only people with write access can dispatch this — so
+# for a personal/private repo, that's just the owner.
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Release tag (e.g. v1.2.0)"
+      bump:
+        description: "Which segment of the latest tag to bump"
         required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      tag_override:
+        description: "Explicit tag (overrides bump, e.g. v2.0.0-rc1). Leave empty for auto."
+        required: false
+        default: ""
       notes:
         description: "Release notes (markdown). Leave empty to auto-generate from commits."
         required: false
@@ -25,16 +37,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # full history so build-app.sh can run `git describe --tags` and
-          # `git rev-list --count` to stamp a real version into Info.plist
+          # full history + tags so build-app.sh can run `git describe --tags`
+          # and `git rev-list --count` to stamp a real version into Info.plist
           fetch-depth: 0
 
-      - name: Sanity check — tag does not already exist
+      - name: Compute next tag
+        id: compute
         run: |
-          if git rev-parse "${{ inputs.tag }}" >/dev/null 2>&1; then
-            echo "::error::Tag ${{ inputs.tag }} already exists." >&2
+          if [[ -n "${{ inputs.tag_override }}" ]]; then
+            TAG="${{ inputs.tag_override }}"
+            echo "Using explicit override: $TAG"
+          else
+            LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            LATEST="${LATEST:-v0.0.0}"
+            VER="${LATEST#v}"
+            IFS='.' read -r MAJ MIN PATCH <<< "$VER"
+            case "${{ inputs.bump }}" in
+              major) MAJ=$((MAJ + 1)); MIN=0; PATCH=0 ;;
+              minor) MIN=$((MIN + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+              *) echo "::error::unknown bump kind"; exit 1 ;;
+            esac
+            TAG="v${MAJ}.${MIN}.${PATCH}"
+            echo "Latest tag: $LATEST  →  Next (${{ inputs.bump }}): $TAG"
+          fi
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists." >&2
             exit 1
           fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "::notice::Releasing $TAG"
 
       - name: Configure git
         run: |
@@ -42,7 +74,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Create local tag (so build-app.sh stamps the right version)
-        run: git tag -a "${{ inputs.tag }}" -m "${{ inputs.tag }}"
+        run: git tag -a "${{ steps.compute.outputs.tag }}" -m "${{ steps.compute.outputs.tag }}"
 
       - name: Build .app
         env:
@@ -51,24 +83,21 @@ jobs:
 
       - name: Zip the .app
         run: |
-          ditto -c -k --keepParent UpdateAll.app "UpdateAll-${{ inputs.tag }}.zip"
-          ls -la "UpdateAll-${{ inputs.tag }}.zip"
+          ZIP="UpdateAll-${{ steps.compute.outputs.tag }}.zip"
+          ditto -c -k --keepParent UpdateAll.app "$ZIP"
+          ls -la "$ZIP"
 
       - name: Push tag
-        run: git push origin "${{ inputs.tag }}"
+        run: git push origin "${{ steps.compute.outputs.tag }}"
 
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          TAG="${{ steps.compute.outputs.tag }}"
+          ZIP="UpdateAll-${TAG}.zip"
           if [[ -n "${{ inputs.notes }}" ]]; then
-            gh release create "${{ inputs.tag }}" \
-              --title "${{ inputs.tag }}" \
-              --notes "${{ inputs.notes }}" \
-              "UpdateAll-${{ inputs.tag }}.zip"
+            gh release create "$TAG" --title "$TAG" --notes "${{ inputs.notes }}" "$ZIP"
           else
-            gh release create "${{ inputs.tag }}" \
-              --title "${{ inputs.tag }}" \
-              --generate-notes \
-              "UpdateAll-${{ inputs.tag }}.zip"
+            gh release create "$TAG" --title "$TAG" --generate-notes "$ZIP"
           fi
