@@ -12,68 +12,229 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMenu()
         buildWindow()
-        offerPrereqFixesIfNeeded()
-        runScript()
+        offerSudoersFixIfNeeded()
+        requireAppManagement { [weak self] in self?.runScript() }
     }
 
-    /// Check that the optional sudoers / Touch ID / App Management features are
-    /// in place; if not, offer one-click prompts. The script will run either
-    /// way — these are conveniences, not requirements.
-    func offerPrereqFixesIfNeeded() {
+    /// State file recording that the user confirmed App Management for THIS
+    /// build of UpdateAll. We pin it to the bundle's actual codesign CDHash
+    /// (not CFBundleVersion — that doesn't change between rebuilds of the
+    /// same commit) so any rebuild forces a fresh prompt, matching macOS's
+    /// own rule that TCC is per-signature.
+    private var appMgmtStateFile: String {
+        NSHomeDirectory() + "/Library/Application Support/UpdateAll/app-management-acked"
+    }
+    private var _cachedBuildId: String?
+    private var currentBuildId: String {
+        if let c = _cachedBuildId { return c }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        task.arguments = ["-d", "--verbose=4", Bundle.main.bundlePath]
+        let err = Pipe()
+        task.standardError = err
+        task.standardOutput = Pipe()
+        var id = "unknown"
+        do {
+            try task.run()
+            task.waitUntilExit()
+            if let s = String(data: err.fileHandleForReading.readDataToEndOfFile(),
+                              encoding: .utf8) {
+                for line in s.components(separatedBy: "\n") where line.hasPrefix("CDHash=") {
+                    id = String(line.dropFirst("CDHash=".count))
+                    break
+                }
+            }
+        } catch {}
+        _cachedBuildId = id
+        return id
+    }
+    private func appMgmtAlreadyAcknowledgedForThisBuild() -> Bool {
+        guard let s = try? String(contentsOfFile: appMgmtStateFile, encoding: .utf8) else { return false }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines) == currentBuildId
+    }
+    private func markAppMgmtAcknowledged() {
+        let dir = (appMgmtStateFile as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? currentBuildId.write(toFile: appMgmtStateFile, atomically: true, encoding: .utf8)
+    }
+
+    /// Sudoers v1 → v2 upgrade nudge. Soft prompt; either choice proceeds.
+    func offerSudoersFixIfNeeded() {
         let sudoers = featureCheck("sudoers")
-        if sudoers == "outdated" || sudoers == "missing" {
-            let alert = NSAlert()
-            alert.messageText = sudoers == "missing"
-                ? "Skip the password prompt for system installer?"
-                : "Permissions rule has been updated"
-            alert.informativeText = sudoers == "missing"
-                ? "UpdateAll can install a tiny sudoers rule so the script doesn't ask for your password during routine /usr/sbin/installer and /usr/sbin/softwareupdate calls. You'll be asked for your admin password once now."
-                : "UpdateAll's sudoers rule grew coverage for MacPorts. Update now? (One admin prompt.)"
-            alert.addButton(withTitle: sudoers == "missing" ? "Install" : "Update")
-            alert.addButton(withTitle: "Skip")
-            if alert.runModal() == .alertFirstButtonReturn {
-                _ = runFeatureScript(args: ["sudoers", "enable"])
-            }
-        }
-
-        // App Management consent — actively probe by attempting a benign
-        // write to a brew-installed app bundle. If TCC blocks, prompt every
-        // launch until the user flips the switch in System Settings.
-        if !appManagementGranted() {
-            let alert = NSAlert()
-            alert.messageText = "App Management permission required"
-            alert.informativeText = "macOS is blocking UpdateAll from modifying apps in /Applications. Without this permission, brew cask installs and upgrades will silently fail.\n\nOpen System Settings → Privacy & Security → App Management → toggle UpdateAll on."
-            alert.addButton(withTitle: "Open Settings")
-            alert.addButton(withTitle: "Skip This Run")
-            alert.alertStyle = .warning
-            if alert.runModal() == .alertFirstButtonReturn {
-                openAppManagementSettings()
-            }
+        guard sudoers == "outdated" || sudoers == "missing" else { return }
+        let alert = NSAlert()
+        alert.messageText = sudoers == "missing"
+            ? "Skip the password prompt for system installer?"
+            : "Permissions rule has been updated"
+        alert.informativeText = sudoers == "missing"
+            ? "UpdateAll can install a tiny sudoers rule so the script doesn't ask for your password during routine /usr/sbin/installer and /usr/sbin/softwareupdate calls. You'll be asked for your admin password once now."
+            : "UpdateAll's sudoers rule grew coverage for MacPorts. Update now? (One admin prompt.)"
+        alert.addButton(withTitle: sudoers == "missing" ? "Install" : "Update")
+        alert.addButton(withTitle: "Skip")
+        if alert.runModal() == .alertFirstButtonReturn {
+            _ = runFeatureScript(args: ["sudoers", "enable"])
         }
     }
 
-    /// Probe whether macOS App Management permission is granted by trying to
-    /// create + delete a hidden test file inside one of the user's brew-managed
-    /// apps. If TCC denies, `createFile` returns false.
-    func appManagementGranted() -> Bool {
-        let targets = ["Brave Browser.app", "Visual Studio Code.app",
-                       "VLC.app", "Firefox.app", "Google Chrome.app"]
-        let fm = FileManager.default
-        for app in targets {
-            let bundle = "/Applications/\(app)"
-            guard fm.fileExists(atPath: bundle) else { continue }
-            let probe = "\(bundle)/.update-all-tcc-probe"
-            let ok = fm.createFile(atPath: probe, contents: Data())
-            if ok {
-                try? fm.removeItem(atPath: probe)
-                return true
+    private var appMgmtActivationObserver: NSObjectProtocol?
+
+    /// Hard gate: only call `proceed` if the user has confirmed App Management
+    /// access for THIS build of UpdateAll. macOS App Management permission is
+    /// per-code-signature and only takes effect on app restart — there's no
+    /// reliable in-process probe (a Swift-side write to a user-owned app
+    /// bundle slips past tccd because the gating is on privileged writes,
+    /// which is what brew's installer does). So we ask the user once per
+    /// build and persist the acknowledgement.
+    func requireAppManagement(_ proceed: @escaping () -> Void) {
+        if appMgmtAlreadyAcknowledgedForThisBuild() {
+            if let o = appMgmtActivationObserver {
+                NotificationCenter.default.removeObserver(o)
+                appMgmtActivationObserver = nil
             }
-            // create failed → App Management almost certainly blocking
-            return false
+            proceed()
+            return
         }
-        // no brew apps to probe → assume granted; we'll find out for real
-        // once the script tries to install something
-        return true
+        let isUpgrade = FileManager.default.fileExists(atPath: appMgmtStateFile)
+        let alert = NSAlert()
+        let bundlePath = Bundle.main.bundlePath
+        let body = """
+        1. Click Open Settings — UpdateAll's path is also copied to your clipboard.
+        2. In Privacy & Security → App Management:
+           • Click the + (plus) button
+           • Press Cmd+Shift+G in the file picker
+           • Cmd+V to paste the path (\(bundlePath))
+           • Click Open → toggle UpdateAll on
+        3. macOS pops "Quit & Reopen" — click it. UpdateAll restarts with the new permission and runs the updates automatically.
+        """
+        if isUpgrade {
+            alert.messageText = "New version of UpdateAll — refresh access?"
+            alert.informativeText = "This build of UpdateAll (\(currentBuildId)) has a different code signature than the one you previously authorized, so macOS treats it as a new app. App Management permission must be re-granted and UpdateAll restarted before it can install or update casks.\n\n" + body
+        } else {
+            alert.messageText = "App Management permission required"
+            alert.informativeText = "macOS gates writes to /Applications behind an explicit toggle. UpdateAll's cask installs and upgrades won't work until it's granted, and the permission only takes effect on the next launch.\n\n" + body
+        }
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "I've toggled it on — Quit & Reopen")
+        alert.addButton(withTitle: "Quit")
+
+        NSApp.activate(ignoringOtherApps: true)
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            // Copy the bundle path so the file picker in App Management is
+            // a Cmd+Shift+G → Cmd+V → Open instead of a manual navigate.
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(Bundle.main.bundlePath, forType: .string)
+            // Pre-write the acknowledgement now. Once the user toggles the
+            // switch in System Settings macOS will pop its own "Quit & Reopen"
+            // dialog; when they click that, the relaunched process will see
+            // matching state and head straight into the script — no second
+            // modal here. (If they instead click "Later" without granting,
+            // brew's first cask install will fail and surface the error.)
+            markAppMgmtAcknowledged()
+            openAppManagementSettings()
+            // If they come back via Cmd-Tab instead of macOS's relaunch
+            // dialog (i.e. they Later'd it), re-check on activation — state
+            // now matches so requireAppManagement falls through to proceed.
+            if appMgmtActivationObserver == nil {
+                appMgmtActivationObserver = NotificationCenter.default.addObserver(
+                    forName: NSApplication.didBecomeActiveNotification,
+                    object: nil, queue: .main
+                ) { [weak self] _ in
+                    self?.requireAppManagement(proceed)
+                }
+            }
+        case .alertSecondButtonReturn:
+            // user asserts they already granted the toggle; persist the
+            // build ID and relaunch so the new process inherits fresh TCC
+            markAppMgmtAcknowledged()
+            relaunchSelf()
+        default:
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// Relaunch UpdateAll cleanly so the new process picks up freshly-granted
+    /// TCC permissions. We schedule an `open` in a detached shell and then
+    /// terminate ourselves; the shell sleeps ~0.3s so our process is gone
+    /// before macOS tries to launch the (single-instance) app.
+    private func relaunchSelf() {
+        let appPath = Bundle.main.bundlePath
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "sleep 0.3; open \"\(appPath)\""]
+        try? task.run()
+        NSApp.terminate(nil)
+    }
+
+    /// Probe whether macOS App Management permission is granted.
+    ///
+    /// The naïve "create a hidden file inside .app" test FAILS — macOS doesn't
+    /// consider that a TCC-protected modification, so it returns success even
+    /// when the actual cask install (which replaces the whole .app) would be
+    /// blocked. We need an operation TCC actually gates.
+    ///
+    /// What works: an atomic write to an existing file inside a third-party
+    /// signed .app bundle. The atomic step renames a temp file over the target,
+    /// which is what TCC actually checks for "modifying another app". We read
+    /// the existing bytes and write them back, then restore the original
+    /// modification timestamp so we're a no-op visible to brew/codesign.
+    func appManagementGranted() -> Bool {
+        let fm = FileManager.default
+        var candidates: [String] = []
+        for app in ["Brave Browser.app", "Visual Studio Code.app",
+                    "VLC.app", "Firefox.app", "Google Chrome.app"] {
+            let info = "/Applications/\(app)/Contents/Info.plist"
+            if fm.fileExists(atPath: info) { candidates.append(info) }
+        }
+        if candidates.isEmpty,
+           let items = try? fm.contentsOfDirectory(atPath: "/Applications") {
+            // skip Apple-shipped apps (separate TCC entitlements)
+            let appleApps: Set<String> = ["Safari.app", "Mail.app", "Calendar.app",
+                "Contacts.app", "Messages.app", "FaceTime.app", "Photos.app",
+                "Music.app", "TV.app", "News.app", "Reminders.app", "Notes.app",
+                "Books.app", "Maps.app", "Stocks.app", "Weather.app",
+                "Voice Memos.app", "Find My.app", "Freeform.app",
+                "Image Capture.app", "Photo Booth.app", "Preview.app",
+                "QuickTime Player.app", "Stickies.app", "TextEdit.app",
+                "Time Machine.app", "Dictionary.app", "Font Book.app",
+                "Chess.app", "Calculator.app", "App Store.app",
+                "System Settings.app", "Pages.app", "Numbers.app",
+                "Keynote.app", "GarageBand.app", "iMovie.app",
+                "Shortcuts.app", "Home.app", "Automator.app"]
+            for name in items where name.hasSuffix(".app") && !appleApps.contains(name) {
+                let info = "/Applications/\(name)/Contents/Info.plist"
+                if fm.fileExists(atPath: info) { candidates.append(info) }
+            }
+        }
+        for path in candidates {
+            let url = URL(fileURLWithPath: path)
+            do {
+                let originalMtime = (try fm.attributesOfItem(atPath: path))[.modificationDate]
+                let original = try Data(contentsOf: url)
+                // Write *modified* bytes first, then restore. Writing identical
+                // bytes back gets optimized into a no-op by macOS and slips
+                // past tccd; an actual content change forces a real rename
+                // that tccd validates against the current code signature.
+                let modified = original + Data([0x20])    // append one space
+                try modified.write(to: url, options: .atomic)
+                try original.write(to: url, options: .atomic)
+                if let mtime = originalMtime as? Date {
+                    try? fm.setAttributes([.modificationDate: mtime], ofItemAtPath: path)
+                }
+                return true
+            } catch {
+                // Likely TCC denial (EPERM) — but could also be a root-owned
+                // file (EACCES). Try the next candidate before concluding.
+                continue
+            }
+        }
+        // every write failed → App Management is blocking us, OR every
+        // candidate is root-owned (unlikely with brew installs). Either way,
+        // the upcoming cask install would fail; safer to treat as blocked.
+        return false
     }
 
     @objc func openAppManagementSettings() {
@@ -97,7 +258,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         main.addItem(appItem)
         let appMenu = NSMenu()
         appItem.submenu = appMenu
-        appMenu.addItem(withTitle: "About Update All", action: nil, keyEquivalent: "")
+        appMenu.addItem(withTitle: "About Update All",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                        keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Update All",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -133,7 +296,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(suItem)
 
         menu.addItem(NSMenuItem.separator())
-        let appMgmtState = appManagementGranted() ? "✓ granted" : "⚠ blocked"
+        let appMgmtState = appMgmtAlreadyAcknowledgedForThisBuild()
+            ? "✓ acknowledged for build \(currentBuildId)"
+            : "⚠ needs grant + restart"
         let appMgmtItem = NSMenuItem(
             title: "App Management permission… (\(appMgmtState))",
             action: #selector(openAppManagementSettings), keyEquivalent: "")

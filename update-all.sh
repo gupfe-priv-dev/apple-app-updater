@@ -503,13 +503,16 @@ if [[ ${#_stuck[@]} -gt 0 ]]; then
   fi
 fi
 
-# Strip com.apple.quarantine from every /Applications/*.app — brew removed the
-# --no-quarantine flag, so we do it ourselves to skip the Gatekeeper
-# "verifying X.app" dialog on first launch of a just-installed cask. Idempotent
-# (silent no-op when the xattr isn't present); does nothing for apps the user
-# never installed via brew.
+# Strip com.apple.quarantine — brew removed the --no-quarantine flag so we do
+# it ourselves to skip the Gatekeeper "verifying X.app" dialog on first launch.
+# Fast path: `xattr -p` checks for the attribute (one stat call per .app); only
+# the apps that actually have it pay for the recursive `xattr -dr` (which can
+# be tens of seconds on bundles with thousands of files). Parallel for speed.
 find /Applications -maxdepth 2 -name '*.app' -print0 2>/dev/null \
-  | xargs -0 -I{} xattr -dr com.apple.quarantine "{}" 2>/dev/null
+  | xargs -0 -P 8 -I{} sh -c '
+      xattr -p com.apple.quarantine "$1" >/dev/null 2>&1 || exit 0
+      xattr -dr com.apple.quarantine "$1" 2>/dev/null
+    ' _ {}
 
 # brew cleanup — capture output so we can detect permission errors
 _cleanup_log=$(mktemp)
