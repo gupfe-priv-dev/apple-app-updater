@@ -23,8 +23,19 @@ SHORT_VERSION="$TAG_VERSION ($COMMIT, $BUILD_TIME)"
 BUILD_VERSION="$COMMIT_COUNT"
 echo "  version: $SHORT_VERSION   (build $BUILD_VERSION)"
 
-swiftc -o "$APP/Contents/MacOS/UpdateAll" "$DIR/UpdateAll.swift" \
-    -framework AppKit -framework Foundation -O
+# Build a universal binary so the .app runs on both Intel and Apple Silicon.
+# CI runs on macos-latest (Apple Silicon) and would otherwise ship an arm64-
+# only binary that Intel Macs refuse with "not supported on this Mac".
+# Targeting macOS 11 (Big Sur) keeps NSImage SF Symbol APIs available.
+swiftc -target x86_64-apple-macos11 -O -framework AppKit -framework Foundation \
+    -o "$APP/Contents/MacOS/UpdateAll.x86_64" "$DIR/UpdateAll.swift"
+swiftc -target arm64-apple-macos11   -O -framework AppKit -framework Foundation \
+    -o "$APP/Contents/MacOS/UpdateAll.arm64"  "$DIR/UpdateAll.swift"
+lipo -create \
+    "$APP/Contents/MacOS/UpdateAll.x86_64" \
+    "$APP/Contents/MacOS/UpdateAll.arm64" \
+    -output "$APP/Contents/MacOS/UpdateAll"
+rm "$APP/Contents/MacOS/UpdateAll.x86_64" "$APP/Contents/MacOS/UpdateAll.arm64"
 
 # bundle the shell scripts so the .app is self-contained
 cp "$DIR/update-all.sh" "$APP/Contents/Resources/"
