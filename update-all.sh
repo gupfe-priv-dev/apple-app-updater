@@ -513,7 +513,10 @@ try:
 except Exception: pass
 ") || true
   [[ -z "$_map" ]] && return
-  local recovered=0
+  # Collect missing-target casks first — DON'T auto-reinstall. The user may
+  # have removed the app deliberately (manual trash) and the cask metadata is
+  # just stale; reinstalling would resurrect something they meant gone.
+  local _missing=()
   typeset -A _seen
   while IFS=$'\t' read -r _token _app; do
     [[ -z "$_token" || -z "$_app" ]] && continue
@@ -521,17 +524,28 @@ except Exception: pass
     local _target="/Applications/$_app"
     if [[ ! -d "$_target/Contents/MacOS" ]]; then
       _seen[$_token]=1
-      echo "  ↻ $_app is missing or empty — brew reinstall --cask $_token"
-      brew reinstall --cask --force --quiet "$_token" 2>&1 | _brew_filter || true
-      if [[ -d "$_target/Contents/MacOS" ]]; then
-        recovered=$((recovered + 1))
-        echo "    ✓ recovered"
-      else
-        echo "    ✗ reinstall did not produce $_app"
-      fi
+      _missing+=("$_token|$_app")
     fi
   done <<< "$_map"
-  [[ $recovered -gt 0 ]] && echo "  ↻ Recovered $recovered cask app(s) via brew reinstall"
+  [[ ${#_missing[@]} -eq 0 ]] && return
+  echo ""
+  echo "  ⚠ Cask-managed apps missing from /Applications:"
+  for _entry in "${_missing[@]}"; do
+    IFS='|' read -r _token _app <<< "$_entry"
+    echo "     • $_app  (brew cask: $_token)"
+  done
+  echo ""
+  echo "    If you removed these on purpose: run \`brew uninstall --cask <token>\` to drop brew's tracking."
+  echo "    Otherwise we can re-fetch from upstream now."
+  if ask_yn "Reinstall the ${#_missing[@]} missing cask(s)?"; then
+    for _entry in "${_missing[@]}"; do
+      IFS='|' read -r _token _app <<< "$_entry"
+      echo "  ↻ brew reinstall --cask $_token"
+      brew reinstall --cask --force --quiet "$_token" 2>&1 | _brew_filter || true
+    done
+  else
+    echo "  ⊘ Skipped — brew metadata still references the removed app(s)."
+  fi
 }
 _restore_drifted_casks
 
