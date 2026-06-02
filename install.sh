@@ -8,10 +8,10 @@ echo "==> Building UpdateAll.app..."
 
 echo ""
 echo "==> Registering UpdateAll.app with Launch Services..."
-# Ensures `open -b com.gunnar.update-all` finds the app no matter where it lives.
-# Required because apps outside /Applications are not auto-indexed.
+# build-app.sh now installs to /Applications and re-registers; we re-register
+# again here so a Launch Services hiccup doesn't leave bundle-id lookup stale.
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
-    -f "$DIR/UpdateAll.app"
+    -f "/Applications/UpdateAll.app"
 echo "    ✓ Registered (bundle id: com.gunnar.update-all)"
 
 echo ""
@@ -65,4 +65,4 @@ echo "    ✓ update-all available in PATH"
 
 echo ""
 echo "All done. UpdateAll.app will open automatically at next login."
-echo "Run manually: open \"$DIR/UpdateAll.app\""
+echo "Run manually: open /Applications/UpdateAll.app"

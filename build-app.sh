@@ -14,8 +14,12 @@ mkdir -p "$APP/Contents/Resources"
 # Falls back to "dev"/"0" when not in a git checkout (e.g. unzipped tarball).
 COMMIT=$(cd "$DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo "dev")
 COMMIT_COUNT=$(cd "$DIR" 2>/dev/null && git rev-list --count HEAD 2>/dev/null || echo "0")
+# Latest release tag (e.g. v1.1.0) — strip the leading `v` for the human
+# version. Falls back to 0.0 in non-tagged checkouts.
+TAG=$(cd "$DIR" 2>/dev/null && git describe --tags --abbrev=0 2>/dev/null || echo "v0.0")
+TAG_VERSION="${TAG#v}"
 BUILD_TIME=$(date '+%Y-%m-%d %H:%M')
-SHORT_VERSION="1.0 ($COMMIT, $BUILD_TIME)"
+SHORT_VERSION="$TAG_VERSION ($COMMIT, $BUILD_TIME)"
 BUILD_VERSION="$COMMIT_COUNT"
 echo "  version: $SHORT_VERSION   (build $BUILD_VERSION)"
 
@@ -53,21 +57,24 @@ PLIST
 xattr -rc "$APP"
 codesign --sign - --force --deep "$APP" &>/dev/null
 
-# Reset macOS App Management TCC for our bundle ID. Each rebuild produces a
-# new ad-hoc signature; the prior "on" toggle in System Settings becomes stale
-# and tccd will silently deny the first cask install once it notices the
-# signature mismatch. Wiping the TCC entry forces a fresh consent prompt that
-# UpdateAll's startup probe can detect cleanly.
-tccutil reset SystemPolicyAppBundles com.gunnar.update-all &>/dev/null || true
+# SKIP_INSTALL=1 → CI / packaging builds skip everything below (no /Applications
+# write, no tccutil) so the runner just produces a zippable .app artifact.
+if [[ -z "${SKIP_INSTALL:-}" ]]; then
+    # Reset macOS App Management TCC for our bundle ID. Each rebuild produces
+    # a new ad-hoc signature; the prior "on" toggle in System Settings becomes
+    # stale and tccd will silently deny the first cask install once it notices
+    # the signature mismatch. Wiping the TCC entry forces a fresh consent
+    # prompt that UpdateAll's startup probe can detect cleanly.
+    tccutil reset SystemPolicyAppBundles com.gunnar.update-all &>/dev/null || true
 
-# Sync the freshly-built app to /Applications so it lives at the canonical
-# location System Settings shows when adding entries to App Management. We
-# keep the in-repo copy too (it's what swiftc just wrote into) so dev /
-# debug flows still work.
-INSTALLED="/Applications/UpdateAll.app"
-rm -rf "$INSTALLED"
-cp -R "$APP" "$INSTALLED"
-/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$INSTALLED" >/dev/null 2>&1
-
-echo "Done → $APP"
-echo "      → $INSTALLED  (installed)"
+    # Sync the freshly-built app to /Applications so it lives at the canonical
+    # location System Settings shows when adding entries to App Management.
+    INSTALLED="/Applications/UpdateAll.app"
+    rm -rf "$INSTALLED"
+    cp -R "$APP" "$INSTALLED"
+    /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$INSTALLED" >/dev/null 2>&1
+    echo "Done → $APP"
+    echo "      → $INSTALLED  (installed)"
+else
+    echo "Done → $APP   (SKIP_INSTALL set, /Applications untouched)"
+fi
