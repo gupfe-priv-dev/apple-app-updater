@@ -12,7 +12,81 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMenu()
         buildWindow()
+        offerPrereqFixesIfNeeded()
         runScript()
+    }
+
+    /// Check that the optional sudoers / Touch ID / App Management features are
+    /// in place; if not, offer one-click prompts. The script will run either
+    /// way — these are conveniences, not requirements.
+    func offerPrereqFixesIfNeeded() {
+        let sudoers = featureCheck("sudoers")
+        if sudoers == "outdated" || sudoers == "missing" {
+            let alert = NSAlert()
+            alert.messageText = sudoers == "missing"
+                ? "Skip the password prompt for system installer?"
+                : "Permissions rule has been updated"
+            alert.informativeText = sudoers == "missing"
+                ? "UpdateAll can install a tiny sudoers rule so the script doesn't ask for your password during routine /usr/sbin/installer and /usr/sbin/softwareupdate calls. You'll be asked for your admin password once now."
+                : "UpdateAll's sudoers rule grew coverage for MacPorts. Update now? (One admin prompt.)"
+            alert.addButton(withTitle: sudoers == "missing" ? "Install" : "Update")
+            alert.addButton(withTitle: "Skip")
+            if alert.runModal() == .alertFirstButtonReturn {
+                _ = runFeatureScript(args: ["sudoers", "enable"])
+            }
+        }
+
+        // App Management consent — actively probe by attempting a benign
+        // write to a brew-installed app bundle. If TCC blocks, prompt every
+        // launch until the user flips the switch in System Settings.
+        if !appManagementGranted() {
+            let alert = NSAlert()
+            alert.messageText = "App Management permission required"
+            alert.informativeText = "macOS is blocking UpdateAll from modifying apps in /Applications. Without this permission, brew cask installs and upgrades will silently fail.\n\nOpen System Settings → Privacy & Security → App Management → toggle UpdateAll on."
+            alert.addButton(withTitle: "Open Settings")
+            alert.addButton(withTitle: "Skip This Run")
+            alert.alertStyle = .warning
+            if alert.runModal() == .alertFirstButtonReturn {
+                openAppManagementSettings()
+            }
+        }
+    }
+
+    /// Probe whether macOS App Management permission is granted by trying to
+    /// create + delete a hidden test file inside one of the user's brew-managed
+    /// apps. If TCC denies, `createFile` returns false.
+    func appManagementGranted() -> Bool {
+        let targets = ["Brave Browser.app", "Visual Studio Code.app",
+                       "VLC.app", "Firefox.app", "Google Chrome.app"]
+        let fm = FileManager.default
+        for app in targets {
+            let bundle = "/Applications/\(app)"
+            guard fm.fileExists(atPath: bundle) else { continue }
+            let probe = "\(bundle)/.update-all-tcc-probe"
+            let ok = fm.createFile(atPath: probe, contents: Data())
+            if ok {
+                try? fm.removeItem(atPath: probe)
+                return true
+            }
+            // create failed → App Management almost certainly blocking
+            return false
+        }
+        // no brew apps to probe → assume granted; we'll find out for real
+        // once the script tries to install something
+        return true
+    }
+
+    @objc func openAppManagementSettings() {
+        // macOS Ventura+ deep link to the App Management pane.
+        let url = URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AppBundles")!
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Wrapper around features.sh `<feature> check` — returns "current",
+    /// "outdated", "missing", or "" on script error.
+    func featureCheck(_ feature: String) -> String {
+        runFeatureScript(args: [feature, "check"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     func buildMenu() {
@@ -57,6 +131,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             action: #selector(toggleSudoers), keyEquivalent: "")
         suItem.target = self
         menu.addItem(suItem)
+
+        menu.addItem(NSMenuItem.separator())
+        let appMgmtState = appManagementGranted() ? "✓ granted" : "⚠ blocked"
+        let appMgmtItem = NSMenuItem(
+            title: "App Management permission… (\(appMgmtState))",
+            action: #selector(openAppManagementSettings), keyEquivalent: "")
+        appMgmtItem.target = self
+        menu.addItem(appMgmtItem)
 
         menu.addItem(NSMenuItem.separator())
         let openLog = NSMenuItem(title: "Show log in Console",
@@ -321,6 +403,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let dir = NSHomeDirectory() + "/Library/Logs"
         let path = dir + "/update-all.log"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        rotateLog(atPath: path, keep: 4)   // we're about to write the 5th
         if !FileManager.default.fileExists(atPath: path) {
             FileManager.default.createFile(atPath: path, contents: nil)
         }
@@ -329,6 +412,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let fmt = ISO8601DateFormatter()
         let header = "\n==== UpdateAll run \(fmt.string(from: Date())) ====\n"
         logHandle?.write(header.data(using: .utf8)!)
+    }
+
+    /// Keep at most `keep` prior runs in the log. Each run begins with
+    /// "==== UpdateAll run <ISO> ====" on its own line — find those markers
+    /// and drop everything before the `keep`-th from the end.
+    private func rotateLog(atPath path: String, keep: Int) {
+        guard let existing = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+        let lines = existing.components(separatedBy: "\n")
+        var headerIndexes: [Int] = []
+        for (i, line) in lines.enumerated() {
+            if line.hasPrefix("==== UpdateAll run ") { headerIndexes.append(i) }
+        }
+        guard headerIndexes.count > keep else { return }
+        let dropBefore = headerIndexes[headerIndexes.count - keep]
+        let trimmed = lines[dropBefore...].joined(separator: "\n")
+        try? trimmed.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
     private static let textAttrs: [NSAttributedString.Key: Any] = [

@@ -453,7 +453,7 @@ if [[ -s "$_BREW_SAFE_LIST" ]]; then
       [[ -z "$_cask" ]] && continue
       echo ""
       echo "  → brew install --cask --force --quiet $_cask"
-      # `|| true` keeps `set -euo pipefail` from killing the loop on the very
+      # `|| true` keeps `set -uo pipefail` from killing the loop on the very
       # first cask conflict (e.g. onedrive vs microsoft-office); we recover
       # the real brew exit code from $pipestatus[1] just below.
       { brew install --cask --force --quiet "$_cask" 2>&1 | _brew_filter; } || true
@@ -483,7 +483,11 @@ _cask_log=$(mktemp)
 
 _stuck=()
 while IFS= read -r _line; do
-  if [[ "$_line" =~ ^'Error: '([^:]+)': It seems there is already an App' ]]; then
+  # Two flavours of brew cask "out of sync with disk" errors:
+  #  - "It seems there is already an App at ..." — pre-existing app blocks brew
+  #  - "It seems the App source ... is not there"   — app missing, brew bumped
+  #    its metadata but the .app on disk never updated (silent drift)
+  if [[ "$_line" =~ ^'Error: '([^:]+)': It seems (there is already an App|the App source)' ]]; then
     _stuck+=("${match[1]}")
   fi
 done < "$_cask_log"
@@ -498,6 +502,14 @@ if [[ ${#_stuck[@]} -gt 0 ]]; then
     done
   fi
 fi
+
+# Strip com.apple.quarantine from every /Applications/*.app — brew removed the
+# --no-quarantine flag, so we do it ourselves to skip the Gatekeeper
+# "verifying X.app" dialog on first launch of a just-installed cask. Idempotent
+# (silent no-op when the xattr isn't present); does nothing for apps the user
+# never installed via brew.
+find /Applications -maxdepth 2 -name '*.app' -print0 2>/dev/null \
+  | xargs -0 -I{} xattr -dr com.apple.quarantine "{}" 2>/dev/null
 
 # brew cleanup — capture output so we can detect permission errors
 _cleanup_log=$(mktemp)
