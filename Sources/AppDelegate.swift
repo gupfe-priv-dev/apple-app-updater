@@ -896,8 +896,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         // jumps from 0 to (#skipped) at the start is misleading. Total =
         // sections actually being run; Done = how many of those have a result.
         let active = activeSectionIndex.map { sectionRows[$0].title }
-        let total = sectionRows.filter { $0.status != .skipped }.count
-        let done = sectionRows.filter { $0.status == .done || $0.status == .hasUpdates }.count
+        // Fixed denominator = all tools, so the counter climbs monotonically
+        // (1/12, 2/12, …) instead of jumping as not-installed tools shrink the
+        // total. A section is "complete" once it reaches any terminal state,
+        // including .skipped (not installed / disabled / already up to date).
+        let total = sectionRows.count
+        let done = sectionRows.filter {
+            $0.status == .done || $0.status == .hasUpdates || $0.status == .skipped
+        }.count
         let updates = sectionRows.filter { $0.status == .hasUpdates }.count
         let busy = isScriptRunning
 
