@@ -11,10 +11,34 @@ struct BrewCasksTool: Tool {
 
     func scan(_ ctx: RunContext) async -> ScanResult {
         let r = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--quiet"])
-        let items = r.output.split(separator: "\n")
+        var tokens = r.output.split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            .map { UpdateItem($0) }
-        return .from(items)
+        // Drop "installer manual" casks (e.g. battle-net): brew lists them as
+        // outdated under --greedy but refuses to upgrade them, so they'd show
+        // a perpetual "update available" that Apply Updates can never clear.
+        let manual = await manualInstallerCasks(tokens, ctx)
+        tokens = tokens.filter { !manual.contains($0) }
+        return .from(tokens.map { UpdateItem($0) })
+    }
+
+    /// Of the given cask tokens, which are `installer manual` (brew can't
+    /// auto-upgrade them — they're user-driven installs)?
+    private func manualInstallerCasks(_ tokens: [String], _ ctx: RunContext) async -> Set<String> {
+        guard !tokens.isEmpty else { return [] }
+        let r = await ctx.capture(["brew", "info", "--cask", "--json=v2"] + tokens)
+        guard let data = r.output.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let casks = obj["casks"] as? [[String: Any]] else { return [] }
+        var manual = Set<String>()
+        for c in casks {
+            guard let token = c["token"] as? String else { continue }
+            for art in (c["artifacts"] as? [[String: Any]]) ?? [] {
+                for inst in (art["installer"] as? [Any]) ?? [] {
+                    if let d = inst as? [String: Any], d["manual"] != nil { manual.insert(token) }
+                }
+            }
+        }
+        return manual
     }
 
     func install(_ ctx: RunContext) async -> InstallOutcome {
