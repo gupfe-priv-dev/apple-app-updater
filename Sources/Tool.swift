@@ -25,14 +25,21 @@ final class RunContext {
     func ask(_ question: String) async -> Bool { await asker(question) }
 
     /// Run a command, streaming its output to the console. Returns exit status.
+    /// `env` is merged over the shared base environment.
     @discardableResult
-    func run(_ argv: [String], pty: Bool = true) async -> Int32 {
-        await runner.stream(argv, pty: pty, onChunk: { [emitter] in emitter($0) })
+    func run(_ argv: [String], env: [String: String] = [:], pty: Bool = true) async -> Int32 {
+        await runner.stream(argv, env: merged(env), pty: pty, onChunk: { [emitter] in emitter($0) })
     }
 
     /// Run a command silently and capture its combined output (for parsing).
-    func capture(_ argv: [String]) async -> ProcessRunner.CaptureResult {
-        await runner.capture(argv)
+    func capture(_ argv: [String], env: [String: String] = [:]) async -> ProcessRunner.CaptureResult {
+        await runner.capture(argv, env: merged(env))
+    }
+
+    private func merged(_ extra: [String: String]) -> [String: String] {
+        var e = ProcessRunner.baseEnvironment()
+        for (k, v) in extra { e[k] = v }
+        return e
     }
 }
 

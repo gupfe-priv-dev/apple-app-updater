@@ -36,10 +36,10 @@ echo "  version: $SHORT_VERSION   (build $BUILD_VERSION)"
 # CI runs on macos-latest (Apple Silicon) and would otherwise ship an arm64-
 # only binary that Intel Macs refuse with "not supported on this Mac".
 # Targeting macOS 11 (Big Sur) keeps NSImage SF Symbol APIs available.
-# All app sources live under Sources/. Compiled together as one module (so
-# main.swift is the single top-level-code file). make-icon.swift is NOT here —
-# it's a standalone script run separately below.
-SOURCES=( "$DIR"/Sources/*.swift )
+# All app sources live under Sources/ (recursively — Core/, Tools/, UI/, App/).
+# Compiled together as one module (so main.swift is the single top-level-code
+# file). make-icon.swift is NOT here — it's a standalone script run below.
+SOURCES=( "$DIR"/Sources/**/*.swift(.N) )
 swiftc -target x86_64-apple-macos11 -O -framework AppKit -framework Foundation \
     -o "$APP/Contents/MacOS/UpdateAll.x86_64" "${SOURCES[@]}"
 swiftc -target arm64-apple-macos11   -O -framework AppKit -framework Foundation \
@@ -50,13 +50,12 @@ lipo -create \
     -output "$APP/Contents/MacOS/UpdateAll"
 rm "$APP/Contents/MacOS/UpdateAll.x86_64" "$APP/Contents/MacOS/UpdateAll.arm64"
 
-# bundle the shell scripts so the .app is self-contained
-cp "$DIR/update-all.sh"      "$APP/Contents/Resources/"
-cp "$DIR/update-all-scan.sh" "$APP/Contents/Resources/"
-cp "$DIR/features.sh"        "$APP/Contents/Resources/"
-chmod +x "$APP/Contents/Resources/update-all.sh" \
-         "$APP/Contents/Resources/update-all-scan.sh" \
-         "$APP/Contents/Resources/features.sh"
+# bundle the helper scripts so the .app is self-contained:
+#  - features.sh: sudo / Touch ID / sudoers management (osascript/authopen)
+#  - *.py:        registry + sparkle bridges (ported to Swift in Phase 4)
+cp "$DIR/features.sh" "$APP/Contents/Resources/"
+chmod +x "$APP/Contents/Resources/features.sh"
+cp "$DIR"/Sources/Resources/*.py "$APP/Contents/Resources/" 2>/dev/null || true
 
 # regenerate icon if missing, then bundle
 if [[ ! -f "$DIR/AppIcon.icns" ]]; then

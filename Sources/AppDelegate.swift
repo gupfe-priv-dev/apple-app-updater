@@ -1,7 +1,8 @@
 import AppKit
 import Foundation
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDelegate {
+@MainActor
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDelegate, CoordinatorHost {
     var window: NSWindow!
     var textView: NSTextView!
     var closeButton: NSButton!
@@ -20,23 +21,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     private var toolbarRefreshItem: NSToolbarItem?
     private var toolbarRerunItem:   NSToolbarItem?
     private var toolbarAbortItem:   NSToolbarItem?
-    // The script always emits these section headers in this order. We
-    // pre-populate the sidebar with all of them on launch (greyed out) and
-    // light each one up live as `print_header` emits it.
-    private static let knownSections: [String] = [
-        "App registry",
-        "Homebrew — formulae",
-        "Homebrew — casks",
-        "MacPorts",
-        "Mac App Store",
-        "npm",
-        "Ruby gems",
-        "Rust (rustup)",
-        "pipx",
-        "Claude Code",
-        "Sparkle updates (unmanaged apps)",
-        "macOS Software Update",
-    ]
+    // The ordered tool list defines both the run sequence and the sidebar rows.
+    var toolList: [Tool] = []
+    var coordinator: Coordinator!
     private struct SectionRow {
         var title: String
         var button: NSButton
@@ -45,8 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         var updateCount: Int = 0   // # of updates available (when status == .hasUpdates)
     }
     private enum SectionStatus { case pending, active, done, hasUpdates, skipped }
-    enum RunMode { case scan, install }
-    private var currentRunMode: RunMode = .scan
+    private var currentRunMode: Coordinator.Mode = .scan
     private var sectionRows: [SectionRow] = []
     private var activeSectionIndex: Int?
     private var sectionSpinnerFrame: Int = 0
@@ -61,19 +47,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     private var followLive: Bool = true   // auto-switch on new live section
     private var liveStorage: NSTextStorage { sectionStorages[liveSectionIdx] }
     // streaming-line state for detecting print_header sections
-    private var headerExpected: Bool = false
-    private var currentLineForHeaderDetect: String = ""
     var featuresMenu: NSMenu!
-    var runningProcess: Process?
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        AppPaths.ensure()
+        buildToolList()
+        coordinator = Coordinator(host: self)
         buildMenu()
         buildWindow()
         offerSudoersFixIfNeeded()
         // Start with a scan so the dashboard tells the user what's available
-        // BEFORE any install runs. Install Updates in the toolbar triggers
+        // BEFORE any install runs. Apply Updates in the toolbar triggers
         // the real installer.
-        requireAppManagement { [weak self] in self?.runScript(.scan) }
+        requireAppManagement { [weak self] in self?.coordinator.run(.scan) }
+    }
+
+    /// The tools, in display + execution order. Defines the sidebar rows.
+    private func buildToolList() {
+        toolList = [
+            RegistryTool(), BrewFormulaeTool(), BrewCasksTool(), MacPortsTool(),
+            MasTool(), NpmTool(), GemTool(), RustupTool(), PipxTool(),
+            ClaudeTool(), SparkleTool(), SoftwareUpdateTool(),
+        ]
     }
 
     /// State file recording that the user confirmed App Management for THIS
@@ -203,7 +198,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                     forName: NSApplication.didBecomeActiveNotification,
                     object: nil, queue: .main
                 ) { [weak self] _ in
-                    self?.requireAppManagement(proceed)
+                    // posted on the main queue → safe to assert isolation
+                    MainActor.assumeIsolated { self?.requireAppManagement(proceed) }
                 }
             }
         case .alertSecondButtonReturn:
@@ -631,76 +627,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         return btn
     }
 
-    /// Watch the streaming text for `print_header` output and add the section
-    /// title to the sidebar. The shell emits a "━" rule line, then a line
-    /// like `"  Homebrew — casks"`. We treat the rule as a trigger and add
-    /// the next non-empty "  …" line as a section.
-    private func detectSections(in raw: String) {
-        // ANSI codes are still in `raw` here — strip them for line analysis.
-        let cleaned = Self.ansi.stringByReplacingMatches(
-            in: raw, range: NSRange(raw.startIndex..., in: raw), withTemplate: "")
-            .replacingOccurrences(of: "\r\n", with: "\n")
-        for ch in cleaned {
-            if ch == "\n" {
-                let line = currentLineForHeaderDetect
-                currentLineForHeaderDetect = ""
-                if line.first == "━" {
-                    headerExpected = true
-                } else if headerExpected, line.hasPrefix("  "),
-                          let firstNonSpace = line.first(where: { $0 != " " }),
-                          firstNonSpace != "✓", firstNonSpace != "✗",
-                          firstNonSpace != "↻", firstNonSpace != "•" {
-                    let title = line.trimmingCharacters(in: .whitespaces)
-                    if !title.isEmpty {
-                        handleSectionTitle(title)
-                        headerExpected = false
-                    }
-                } else if !line.isEmpty {
-                    headerExpected = false
-                }
-            } else {
-                currentLineForHeaderDetect.append(ch)
-            }
-        }
+    // MARK: CoordinatorHost ──────────────────────────────────────────────
+    // Section boundaries and results are now explicit (driven by the
+    // Coordinator) instead of scraped from the script's stdout.
+
+    var tools: [Tool] { toolList }
+
+    func runWillStart(_ mode: Coordinator.Mode) {
+        currentRunMode = mode
+        openLog()
+        resetForRun()
     }
 
-    /// Pre-populate every known section as "pending" so the user can see the
-    /// whole pipeline at a glance and jump to a finished one immediately.
-    private func populateUpdateSectionsSidebar() {
-        for (i, title) in Self.knownSections.enumerated() {
-            let btn = sidebarRow(title: title, systemSymbol: "circle",
-                                 target: self,
-                                 action: #selector(jumpToSection(_:)),
-                                 tint: NSColor.tertiaryLabelColor)
-            btn.tag = i
-            sectionsStack.addArrangedSubview(btn)
-            sectionRows.append(SectionRow(title: title, button: btn,
-                                          status: .pending, offset: 0))
-        }
-    }
-
-    /// `print_header "<title>"` arrived. Mark prior active as done, mark this
-    /// row as active, allocate a fresh log storage for this section, and (if
-    /// the user is following live) swap the textView display to it.
-    private func handleSectionTitle(_ title: String) {
-        guard let idx = sectionRows.firstIndex(where: { $0.title == title }) else { return }
-        if let prev = activeSectionIndex {
-            // classify the section we're leaving by what it wrote to its
-            // log buffer ("update(s) available", "not installed — skipping", …)
-            classifySection(prev)
-        }
-        // sectionStorages[0] is preamble; section N rows map to storage N+1
-        let newLiveIdx = idx + 1
-        while sectionStorages.count <= newLiveIdx {
-            sectionStorages.append(NSTextStorage())
-        }
+    /// Section `idx` became active: allocate its log storage, mark the row,
+    /// and (if following live) swap the console to it.
+    func sectionDidBegin(_ idx: Int) {
+        let newLiveIdx = idx + 1   // storage[0] is the preamble
+        while sectionStorages.count <= newLiveIdx { sectionStorages.append(NSTextStorage()) }
         liveSectionIdx = newLiveIdx
-        // Reset per-line state — each section starts with a fresh line buffer,
-        // no spinner, no half-emitted progress line.
         lineStartLen = 0
         pendingLogLine = ""
         spinnerVisible = false
-        sectionRows[idx].offset = 0   // top of this section's own storage
+        sectionRows[idx].offset = 0
         activeSectionIndex = idx
         markRow(idx, status: .active)
         if followLive {
@@ -714,6 +662,115 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                                                       userInfo: nil, repeats: true)
         }
     }
+
+    func appendConsole(_ text: String) { append(text) }
+
+    func sectionDidEndScan(_ idx: Int, _ result: ScanResult) {
+        renderScanSummary(result)
+        switch result.state {
+        case .hasUpdates:
+            sectionRows[idx].updateCount = result.items.count
+            markRow(idx, status: .hasUpdates)
+        case .unavailable:
+            markRow(idx, status: .skipped)
+        case .upToDate, .unknown:
+            sectionRows[idx].updateCount = 0
+            markRow(idx, status: .done)
+        }
+        activeSectionIndex = nil
+        updateToolbarState()
+        refreshDashboard()
+    }
+
+    func sectionDidEndInstall(_ idx: Int, _ outcome: InstallOutcome) {
+        switch outcome.state {
+        case .ok:
+            markRow(idx, status: .done)
+        case .skipped:
+            markRow(idx, status: .done)
+            if let m = outcome.message { appendConsole("  ⊘ \(m)\n") }
+        case .failed:
+            markRow(idx, status: .done)
+            appendConsole("  ✗ \(outcome.message ?? "failed")\n")
+        case .unavailable:
+            markRow(idx, status: .skipped)
+        }
+        sectionRows[idx].updateCount = 0
+        activeSectionIndex = nil
+        updateToolbarState()
+        refreshDashboard()
+    }
+
+    func sectionSkipped(_ idx: Int, reason: String) {
+        // "up to date" on an install pass reads as success (green check);
+        // disabled / not-installed reads as intentionally inactive (grey).
+        markRow(idx, status: reason == "up to date" ? .done : .skipped)
+        refreshDashboard()
+    }
+
+    func ask(_ question: String) async -> Bool {
+        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Update All"
+            alert.informativeText = question
+            alert.addButton(withTitle: "Yes")
+            alert.addButton(withTitle: "No")
+            // Sheet (drops from the titlebar) keeps the prompt inside the app.
+            alert.beginSheetModal(for: self.window) { resp in
+                let yes = (resp == .alertFirstButtonReturn)
+                self.appendConsole("  → \(yes ? "Yes" : "No")\n")
+                cont.resume(returning: yes)
+            }
+        }
+    }
+
+    func runDidFinish(_ mode: Coordinator.Mode, aborted: Bool) {
+        sectionSpinnerTimer?.invalidate(); sectionSpinnerTimer = nil
+        eraseSpinner()
+        activeSectionIndex = nil
+        abortButton.isHidden = true
+        abortButton.title = "Abort"
+        abortButton.action = #selector(abortRun)
+        abortButton.isEnabled = true
+        closeButton.isHidden = false
+        updateToolbarState()
+        refreshDashboard()
+        showRightPane(.dashboard)
+        if mode == .install && !aborted { showSuccessScreen() }
+    }
+
+    /// Append a standard one-line summary of a scan result to the console.
+    private func renderScanSummary(_ r: ScanResult) {
+        switch r.state {
+        case .upToDate:
+            appendConsole("  ✓ Up to date\n")
+        case .unavailable:
+            appendConsole("  – not installed — skipping\n")
+        case .unknown:
+            appendConsole("  ? \(r.note ?? "indeterminate")\n")
+        case .hasUpdates:
+            appendConsole("  ↑ \(r.items.count) update\(r.items.count == 1 ? "" : "s") available\n")
+            for it in r.items.prefix(40) { appendConsole("    • \(it.summary)\n") }
+            if r.items.count > 40 { appendConsole("    … and \(r.items.count - 40) more\n") }
+        }
+    }
+
+    /// Pre-populate every known section as "pending" so the user can see the
+    /// whole pipeline at a glance and jump to a finished one immediately.
+    private func populateUpdateSectionsSidebar() {
+        for (i, tool) in toolList.enumerated() {
+            let btn = sidebarRow(title: tool.title, systemSymbol: "circle",
+                                 target: self,
+                                 action: #selector(jumpToSection(_:)),
+                                 tint: NSColor.tertiaryLabelColor)
+            btn.tag = i
+            sectionsStack.addArrangedSubview(btn)
+            sectionRows.append(SectionRow(title: tool.title, button: btn,
+                                          status: .pending, offset: 0))
+        }
+    }
+
 
     private func markRow(_ idx: Int, status: SectionStatus) {
         sectionRows[idx].status = status
@@ -756,36 +813,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                         .withSymbolConfiguration(cfg)
             btn.contentTintColor = NSColor.tertiaryLabelColor
         }
-    }
-
-    /// Look at a section's accumulated console output and classify it
-    /// (used by both scan and install runs to mark the sidebar row).
-    private func classifySection(_ idx: Int) {
-        guard idx >= 0, idx < sectionRows.count else { return }
-        let storageIdx = idx + 1
-        guard storageIdx < sectionStorages.count else { return }
-        let text = sectionStorages[storageIdx].string
-        let status: SectionStatus
-        var count = 0
-        if text.contains("not installed — skipping") ||
-           text.contains("not available — skipping") ||
-           text.contains("not in PATH — skipping") {
-            status = .skipped
-        } else if text.contains("update(s) available") ||
-                  text.contains("Update available") {
-            status = .hasUpdates
-            // pull the leading number out of "↑ N update(s) available"
-            if let r = text.range(of: #"\d+\s+update"#, options: .regularExpression) {
-                count = Int(text[r].split(separator: " ").first ?? "") ?? 0
-            } else if text.contains("Update available") {
-                count = 1
-            }
-        } else {
-            status = .done
-        }
-        sectionRows[idx].updateCount = count
-        markRow(idx, status: status)
-        updateToolbarState()
     }
 
     // MARK: Right-pane state ─────────────────────────────────────────────
@@ -1007,36 +1034,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
 
     @objc func refreshAction() {
         guard !isScriptRunning else { return }
-        // A full re-scan should reconsider every tool — clear the skip list
-        // so previously-absent tools get probed again (they might be installed
-        // by now).
-        skipSectionsForNextRun = []
-        resetForRun()
-        runScript(.scan)
+        coordinator.run(.scan)   // re-scan every enabled tool
     }
 
     @objc func applyAction() {
         guard !isScriptRunning else { return }
-        // Skip sections that either had no tool installed (.skipped) OR had
-        // no updates found in the scan (.done). Only sections with actual
-        // updates (.hasUpdates) and the always-needed App registry are run.
-        skipSectionsForNextRun = sectionRows.filter {
-            ($0.status == .skipped || $0.status == .done) && $0.title != "App registry"
-        }.map { $0.title }
-        resetForRun()
-        runScript(.install)
+        // The coordinator skips tools the last scan found up to date, so an
+        // install only touches sections that actually have updates (plus the
+        // always-run App registry and indeterminate tools like pipx/claude).
+        coordinator.run(.install)
     }
     // legacy alias for the success-view button selector
     @objc func installAction() { applyAction() }
-
-    private var skipSectionsForNextRun: [String] = []
 
     /// Re-evaluate toolbar enable states. Rules:
     ///   - Refresh: enabled iff no run is active.
     ///   - Apply Updates: enabled iff no run is active AND the last scan
     ///     surfaced at least one section with available updates.
     ///   - Abort: enabled iff a run IS active.
-    private var isScriptRunning: Bool { runningProcess?.isRunning == true }
+    private var isScriptRunning: Bool { coordinator?.isRunning == true }
     private var anyUpdatesAvailable: Bool {
         sectionRows.contains { $0.status == .hasUpdates }
     }
@@ -1054,19 +1070,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         window?.toolbar?.validateVisibleItems()
     }
 
-    /// Resets per-run state without launching the script — shared by Refresh
-    /// and Apply Updates so rerun setup lives in one place. Rows whose title
-    /// is in `skipSectionsForNextRun` (i.e. the most recent scan said the tool
-    /// isn't installed) keep their .skipped state so they stay greyed out
-    /// throughout the install instead of cycling through "active" briefly.
+    /// Resets per-run UI state. The coordinator decides which sections to skip
+    /// live (disabled / unavailable / already up to date), so every row starts
+    /// as .pending here.
     private func resetForRun() {
         sectionSpinnerTimer?.invalidate(); sectionSpinnerTimer = nil
-        heartbeat?.invalidate(); heartbeat = nil
         for i in 0..<sectionRows.count {
             sectionRows[i].offset = 0
             sectionRows[i].updateCount = 0
-            let stayDim = skipSectionsForNextRun.contains(sectionRows[i].title)
-            markRow(i, status: stayDim ? .skipped : .pending)
+            markRow(i, status: .pending)
         }
         activeSectionIndex = nil
         sectionStorages = [NSTextStorage()]
@@ -1155,14 +1167,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         sectionRows[idx].button.title = "\(glyph)  \(sectionRows[idx].title)"
     }
 
-    /// Mark the final active row as done and stop the spinner timer.
-    private func finalizeSectionsOnExit() {
-        if let idx = activeSectionIndex { classifySection(idx) }
-        activeSectionIndex = nil
-        sectionSpinnerTimer?.invalidate()
-        sectionSpinnerTimer = nil
-        refreshDashboard()
-    }
 
     @objc private func jumpToSection(_ sender: NSButton) {
         guard sender.tag >= 0, sender.tag < sectionRows.count else { return }
@@ -1216,8 +1220,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     @objc func quit() { NSApp.terminate(nil) }
 
     @objc func abortRun() {
-        guard let proc = runningProcess, proc.isRunning else { return }
-        proc.interrupt()  // SIGINT (= Ctrl+C)
+        guard isScriptRunning else { return }
+        coordinator.abort()   // SIGINT to the current subprocess; stop the loop
         // 2nd click escalates to SIGTERM
         abortButton.title = "Force quit"
         abortButton.action = #selector(forceKill)
@@ -1225,126 +1229,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     }
 
     @objc func forceKill() {
-        guard let proc = runningProcess, proc.isRunning else { return }
-        proc.terminate()  // SIGTERM
+        coordinator?.forceKill()   // SIGTERM
         abortButton.isEnabled = false
         append("\n  ⚠ Sent SIGTERM\n")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         // make sure the subprocess doesn't outlive the app
-        if let proc = runningProcess, proc.isRunning {
-            proc.terminate()
-        }
-    }
-
-    var scriptPath: String {
-        Bundle.main.path(forResource: "update-all", ofType: "sh")!
-    }
-    var scanScriptPath: String {
-        Bundle.main.path(forResource: "update-all-scan", ofType: "sh")!
-    }
-
-    func runScript(_ mode: RunMode = .install) {
-        currentRunMode = mode
-        openLog()
-        let proc = Process()
-        // script(1) allocates a pseudo-TTY so sudo/Touch ID can prompt properly
-        // -F forces an immediate flush after each write so output streams live (no chunking)
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/script")
-        let scriptToRun = (mode == .scan) ? scanScriptPath : scriptPath
-        proc.arguments = ["-F", "-q", "/dev/null", "/bin/zsh", scriptToRun]
-        var env = ProcessInfo.processInfo.environment
-        env["TERM"] = "xterm-256color"
-        env["COLUMNS"] = "110"
-        env["LINES"] = "40"
-        let home = NSHomeDirectory()
-        env["PATH"] = "\(home)/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        env["UPDATER_GUI"] = "1"   // tells ask_yn in the script to use osascript dialogs
-        if mode == .install && !skipSectionsForNextRun.isEmpty {
-            // sections the scan classified as "tool not installed" — the
-            // shell skips them up-front so the sidebar doesn't briefly flash
-            // them as active just to immediately bail.
-            env["UPDATER_SKIP_SECTIONS"] = skipSectionsForNextRun.joined(separator: ",")
-        } else {
-            env.removeValue(forKey: "UPDATER_SKIP_SECTIONS")
-        }
-        proc.environment = env
-
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            DispatchQueue.main.async { self?.append(text) }
-        }
-
-        proc.terminationHandler = { [weak self] proc in
-            DispatchQueue.main.async {
-                self?.heartbeat?.invalidate()
-                self?.heartbeat = nil
-                self?.eraseSpinner()
-                self?.finalizeSectionsOnExit()
-                // distinguish from the script's own "✅ All done" — this only matters
-                // if the script died abnormally (non-zero exit) or was aborted
-                if proc.terminationStatus != 0 {
-                    self?.append("\n[process exited with status \(proc.terminationStatus)]\n")
-                }
-                self?.abortButton.isHidden = true
-                self?.closeButton.isHidden = false
-                self?.setToolbarRunning(false)
-                // Always refresh the dashboard on exit so "Scanning…" /
-                // "Applying…" doesn't get left up if the user aborts.
-                self?.refreshDashboard()
-                self?.showRightPane(.dashboard)
-                // Clean install run → swap to the big success view.
-                if proc.terminationStatus == 0 && self?.currentRunMode == .install {
-                    self?.showSuccessScreen()
-                }
-            }
-        }
-
-        runningProcess = proc
-        try? proc.run()
-        setToolbarRunning(true)
-        // (the per-section sidebar spinner now communicates "still working";
-        // the in-console heartbeat ghost line is intentionally not started)
-    }
-
-    @objc func tickHeartbeat() {
-        guard let proc = runningProcess, proc.isRunning else {
-            eraseSpinner()
-            return
-        }
-        // only render the heartbeat into the live storage AND only while the
-        // user is viewing live — otherwise it'd pollute a frozen past section
-        guard followLive else { return }
-        let storage = liveStorage
-        // only render the spinner at a clean line boundary; don't trample a
-        // partial line in progress (e.g. a \r-style progress update mid-flight)
-        let atBoundary = storage.length == lineStartLen
-        let idle = Date().timeIntervalSince(lastOutputAt)
-        if !spinnerVisible {
-            guard idle >= 2.0, atBoundary else { return }
-            spinnerVisible = true
-            spinnerStartedAt = Date()
-        }
-        let secs = Int(Date().timeIntervalSince(spinnerStartedAt))
-        let glyph = Self.spinnerGlyphs[secs % Self.spinnerGlyphs.count]
-        // erase prior spinner frame and redraw
-        if storage.length > lineStartLen {
-            storage.deleteCharacters(in: NSRange(location: lineStartLen,
-                                                 length: storage.length - lineStartLen))
-        }
-        let attrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor(calibratedWhite: 0.55, alpha: 1),
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
-        ]
-        storage.append(NSAttributedString(string: "  \(glyph) still working… \(secs)s",
-                                          attributes: attrs))
-        textView.scrollToEndOfDocument(nil)
+        coordinator?.forceKill()
     }
 
     private func eraseSpinner() {
@@ -1369,13 +1261,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     // written, so the log keeps a clean record without hundreds of progress ticks
     private var pendingLogLine: String = ""
 
-    // "still alive" spinner — shown as a ghost line after 2s of subprocess
-    // silence (e.g. while pkg installer is unpacking). Erased the moment any
-    // real output arrives or the process exits. Not written to the log.
-    private var lastOutputAt: Date = Date()
+    // Spinner-erase bookkeeping (the active-section sidebar spinner communicates
+    // "still working"; no in-console ghost line is rendered).
     private var spinnerVisible: Bool = false
-    private var spinnerStartedAt: Date = Date()
-    private var heartbeat: Timer?
     private static let spinnerGlyphs = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
     func openLog() {
@@ -1416,9 +1304,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     ]
 
     func append(_ raw: String) {
-        lastOutputAt = Date()
-        detectSections(in: raw)
-
         let cleaned = Self.ansi.stringByReplacingMatches(
             in: raw, range: NSRange(raw.startIndex..., in: raw), withTemplate: "")
             .replacingOccurrences(of: "\r\n", with: "\n")
