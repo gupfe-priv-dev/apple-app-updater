@@ -372,6 +372,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     /// Build the right-click menu for a sidebar section row.
     private func buildSectionMenu(_ menu: SectionMenu) {
         menu.removeAllItems()
+        menu.autoenablesItems = false   // respect our explicit isEnabled values
         guard menu.index < toolList.count else { return }
         let tool = toolList[menu.index]
         let enabled = Settings.isEnabled(tool.id)
@@ -391,6 +392,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         let toggle = NSMenuItem(title: enabled ? "Disable this tool" : "Enable this tool",
                                 action: #selector(toggleSectionEnabled(_:)), keyEquivalent: "")
         toggle.target = self; toggle.tag = menu.index
+        toggle.isEnabled = !busy   // don't let the user toggle a tool mid-run
         menu.addItem(toggle)
     }
 
