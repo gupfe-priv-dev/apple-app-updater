@@ -1017,10 +1017,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
 
     @objc func applyAction() {
         guard !isScriptRunning else { return }
-        // Carry over the scan's "skipped" list — those sections had no tool
-        // detected, so installing through them is a waste of time. The
-        // env var is read by update-all.sh's _skip_if_marked helper.
-        skipSectionsForNextRun = sectionRows.filter { $0.status == .skipped }.map { $0.title }
+        // Skip sections that either had no tool installed (.skipped) OR had
+        // no updates found in the scan (.done). Only sections with actual
+        // updates (.hasUpdates) and the always-needed App registry are run.
+        skipSectionsForNextRun = sectionRows.filter {
+            ($0.status == .skipped || $0.status == .done) && $0.title != "App registry"
+        }.map { $0.title }
         resetForRun()
         runScript(.install)
     }
@@ -1467,9 +1469,3 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
-
-let app = NSApplication.shared
-app.setActivationPolicy(.regular)
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()

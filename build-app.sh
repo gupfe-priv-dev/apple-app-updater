@@ -1,10 +1,19 @@
 #!/bin/zsh
 set -euo pipefail
 DIR="${0:A:h}"
-APP="$DIR/UpdateAll.app"
+FINAL_APP="$DIR/UpdateAll.app"
+
+# Assemble + codesign the bundle in a temp dir OUTSIDE the source tree. The
+# source tree lives under a cloud file-provider that stamps
+# com.apple.FinderInfo / com.apple.fileprovider attributes onto the bundle,
+# which `xattr -rc` can't fully strip and which codesign rejects as
+# "resource fork, Finder information, or similar detritus". Building in /tmp
+# sidesteps that entirely; we copy the signed bundle into place at the end.
+_BUILD_DIR=$(mktemp -d)
+trap 'rm -rf "$_BUILD_DIR"' EXIT
+APP="$_BUILD_DIR/UpdateAll.app"
 
 echo "Building UpdateAll.app..."
-rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 
@@ -27,10 +36,14 @@ echo "  version: $SHORT_VERSION   (build $BUILD_VERSION)"
 # CI runs on macos-latest (Apple Silicon) and would otherwise ship an arm64-
 # only binary that Intel Macs refuse with "not supported on this Mac".
 # Targeting macOS 11 (Big Sur) keeps NSImage SF Symbol APIs available.
+# All app sources live under Sources/. Compiled together as one module (so
+# main.swift is the single top-level-code file). make-icon.swift is NOT here —
+# it's a standalone script run separately below.
+SOURCES=( "$DIR"/Sources/*.swift )
 swiftc -target x86_64-apple-macos11 -O -framework AppKit -framework Foundation \
-    -o "$APP/Contents/MacOS/UpdateAll.x86_64" "$DIR/UpdateAll.swift"
+    -o "$APP/Contents/MacOS/UpdateAll.x86_64" "${SOURCES[@]}"
 swiftc -target arm64-apple-macos11   -O -framework AppKit -framework Foundation \
-    -o "$APP/Contents/MacOS/UpdateAll.arm64"  "$DIR/UpdateAll.swift"
+    -o "$APP/Contents/MacOS/UpdateAll.arm64"  "${SOURCES[@]}"
 lipo -create \
     "$APP/Contents/MacOS/UpdateAll.x86_64" \
     "$APP/Contents/MacOS/UpdateAll.arm64" \
@@ -69,7 +82,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 xattr -rc "$APP"
-codesign --sign - --force --deep "$APP" &>/dev/null
+codesign --sign - --force --deep "$APP"
+
+# Copy the signed bundle from the temp build dir into the source tree. Use
+# ditto (not cp) so it doesn't drag along the source dir's FinderInfo; the
+# signature was sealed in /tmp and stays valid. The file-provider may re-stamp
+# com.apple.provenance on the copy, which codesign tolerates at launch.
+rm -rf "$FINAL_APP"
+ditto "$APP" "$FINAL_APP"
 
 # SKIP_INSTALL=1 → CI / packaging builds skip everything below (no /Applications
 # write, no tccutil) so the runner just produces a zippable .app artifact.
@@ -85,10 +105,10 @@ if [[ -z "${SKIP_INSTALL:-}" ]]; then
     # location System Settings shows when adding entries to App Management.
     INSTALLED="/Applications/UpdateAll.app"
     rm -rf "$INSTALLED"
-    cp -R "$APP" "$INSTALLED"
+    ditto "$APP" "$INSTALLED"
     /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$INSTALLED" >/dev/null 2>&1
-    echo "Done → $APP"
+    echo "Done → $FINAL_APP"
     echo "      → $INSTALLED  (installed)"
 else
-    echo "Done → $APP   (SKIP_INSTALL set, /Applications untouched)"
+    echo "Done → $FINAL_APP   (SKIP_INSTALL set, /Applications untouched)"
 fi
