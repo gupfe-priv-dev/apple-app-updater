@@ -22,6 +22,11 @@ protocol CoordinatorHost: AnyObject {
     func ask(_ question: String) async -> Bool
     /// The whole run finished.
     func runDidFinish(_ mode: Coordinator.Mode, aborted: Bool)
+
+    /// A single-section run is starting (don't reset the other rows).
+    func singleRunWillStart(_ index: Int, _ mode: Coordinator.Mode)
+    /// A single-section run finished.
+    func singleRunDidFinish(_ index: Int, _ mode: Coordinator.Mode, aborted: Bool)
 }
 
 /// Runs the registered tools in order for a scan or install, publishing each
@@ -92,6 +97,45 @@ final class Coordinator {
             }
             self.isRunning = false
             host.runDidFinish(mode, aborted: self.aborted)
+        }
+    }
+
+    /// Run just one tool (from the section context menu). Doesn't reset the
+    /// other rows. Forces the run even if the last scan said up-to-date — the
+    /// user explicitly asked for this section.
+    func runSingle(_ index: Int, _ mode: Mode) {
+        guard !isRunning, let host = host else { return }
+        let tools = host.tools
+        guard index >= 0, index < tools.count else { return }
+        isRunning = true
+        aborted = false
+        host.singleRunWillStart(index, mode)
+        let tool = tools[index]
+        task = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            if !tool.isAvailable() {
+                host.sectionSkipped(index, reason: "not installed")
+            } else {
+                host.sectionDidBegin(index)
+                let ctx = RunContext(
+                    runner: self.runner,
+                    emit: { [weak host] s in
+                        if Thread.isMainThread { host?.appendConsole(s) }
+                        else { DispatchQueue.main.async { host?.appendConsole(s) } }
+                    },
+                    ask: { [weak host] q in await host?.ask(q) ?? false })
+                switch mode {
+                case .scan:
+                    let r = await tool.scan(ctx)
+                    self.lastScan[tool.id] = r
+                    host.sectionDidEndScan(index, r)
+                case .install:
+                    let o = await tool.install(ctx)
+                    host.sectionDidEndInstall(index, o)
+                }
+            }
+            self.isRunning = false
+            host.singleRunDidFinish(index, mode, aborted: self.aborted)
         }
     }
 

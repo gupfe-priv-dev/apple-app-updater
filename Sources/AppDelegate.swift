@@ -31,7 +31,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         var offset: Int  // textStorage position when it became active
         var updateCount: Int = 0   // # of updates available (when status == .hasUpdates)
     }
-    private enum SectionStatus { case pending, active, done, hasUpdates, skipped }
+    private enum SectionStatus { case pending, active, done, hasUpdates, skipped, disabled }
     private var currentRunMode: Coordinator.Mode = .scan
     private var sectionRows: [SectionRow] = []
     private var activeSectionIndex: Int?
@@ -334,6 +334,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
 
     // refresh Features menu items each time it opens so labels reflect current state
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if let section = menu as? SectionMenu { buildSectionMenu(section); return }
         guard menu === featuresMenu else { return }
         menu.removeAllItems()
 
@@ -366,6 +367,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                                  action: #selector(showLog), keyEquivalent: "l")
         openLog.target = self
         menu.addItem(openLog)
+    }
+
+    /// Build the right-click menu for a sidebar section row.
+    private func buildSectionMenu(_ menu: SectionMenu) {
+        menu.removeAllItems()
+        guard menu.index < toolList.count else { return }
+        let tool = toolList[menu.index]
+        let enabled = Settings.isEnabled(tool.id)
+        let busy = isScriptRunning
+
+        let run = NSMenuItem(title: "Update this section now",
+                             action: #selector(runSectionFromMenu(_:)), keyEquivalent: "")
+        run.target = self; run.tag = menu.index; run.isEnabled = enabled && !busy
+        menu.addItem(run)
+
+        let scan = NSMenuItem(title: "Scan this section now",
+                              action: #selector(scanSectionFromMenu(_:)), keyEquivalent: "")
+        scan.target = self; scan.tag = menu.index; scan.isEnabled = enabled && !busy
+        menu.addItem(scan)
+
+        menu.addItem(.separator())
+        let toggle = NSMenuItem(title: enabled ? "Disable this tool" : "Enable this tool",
+                                action: #selector(toggleSectionEnabled(_:)), keyEquivalent: "")
+        toggle.target = self; toggle.tag = menu.index
+        menu.addItem(toggle)
     }
 
     var featuresScriptPath: String {
@@ -703,8 +729,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
 
     func sectionSkipped(_ idx: Int, reason: String) {
         // "up to date" on an install pass reads as success (green check);
-        // disabled / not-installed reads as intentionally inactive (grey).
-        markRow(idx, status: reason == "up to date" ? .done : .skipped)
+        // disabled = user turned it off; not-installed = grey minus.
+        let status: SectionStatus
+        switch reason {
+        case "up to date": status = .done
+        case "disabled":   status = .disabled
+        default:           status = .skipped
+        }
+        markRow(idx, status: status)
         refreshDashboard()
     }
 
@@ -738,6 +770,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         refreshDashboard()
         showRightPane(.dashboard)
         if mode == .install && !aborted { showSuccessScreen() }
+        // nudge the Dock if the user has switched away
+        if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
+    }
+
+    /// A single-section run is starting — open the log and focus just that
+    /// section's console; leave the other rows untouched.
+    func singleRunWillStart(_ index: Int, _ mode: Coordinator.Mode) {
+        currentRunMode = mode
+        openLog()
+        // fresh storage for this section so its prior output doesn't stack up
+        let storageIdx = index + 1
+        while sectionStorages.count <= storageIdx { sectionStorages.append(NSTextStorage()) }
+        sectionStorages[storageIdx] = NSTextStorage()
+        followLive = true
+        abortButton.isHidden = false
+        abortButton.title = "Abort"
+        abortButton.action = #selector(abortRun)
+        abortButton.isEnabled = true
+        closeButton.isHidden = true
+    }
+
+    /// A single-section run finished — keep the console on that section so the
+    /// user sees the result, rather than swapping to the big success screen.
+    func singleRunDidFinish(_ index: Int, _ mode: Coordinator.Mode, aborted: Bool) {
+        sectionSpinnerTimer?.invalidate(); sectionSpinnerTimer = nil
+        eraseSpinner()
+        activeSectionIndex = nil
+        abortButton.isHidden = true
+        abortButton.title = "Abort"
+        abortButton.action = #selector(abortRun)
+        abortButton.isEnabled = true
+        closeButton.isHidden = false
+        updateToolbarState()
+        refreshDashboard()
+        if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
     }
 
     /// Append a standard one-line summary of a scan result to the console.
@@ -765,10 +832,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                                  action: #selector(jumpToSection(_:)),
                                  tint: NSColor.tertiaryLabelColor)
             btn.tag = i
+            // right-click menu: run/scan just this section, enable/disable it
+            let menu = SectionMenu(); menu.index = i; menu.delegate = self
+            btn.menu = menu
             sectionsStack.addArrangedSubview(btn)
             sectionRows.append(SectionRow(title: tool.title, button: btn,
                                           status: .pending, offset: 0))
+            // reflect persisted "disabled" state on launch
+            if !Settings.isEnabled(tool.id) { markRow(i, status: .disabled) }
         }
+    }
+
+    // MARK: per-section context menu ─────────────────────────────────────
+
+    @objc func runSectionFromMenu(_ item: NSMenuItem) {
+        guard !isScriptRunning else { return }
+        coordinator.runSingle(item.tag, .install)
+    }
+    @objc func scanSectionFromMenu(_ item: NSMenuItem) {
+        guard !isScriptRunning else { return }
+        coordinator.runSingle(item.tag, .scan)
+    }
+    @objc func toggleSectionEnabled(_ item: NSMenuItem) {
+        guard item.tag < toolList.count else { return }
+        let tool = toolList[item.tag]
+        let nowEnabled = !Settings.isEnabled(tool.id)
+        Settings.setEnabled(tool.id, nowEnabled)
+        markRow(item.tag, status: nowEnabled ? .pending : .disabled)
+        refreshDashboard()
     }
 
 
@@ -810,6 +901,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
             btn.title = " " + title
             btn.image = NSImage(systemSymbolName: "minus.circle",
                                 accessibilityDescription: "not installed")?
+                        .withSymbolConfiguration(cfg)
+            btn.contentTintColor = NSColor.tertiaryLabelColor
+        case .disabled:
+            // user turned this tool off in the section menu
+            btn.title = " " + title
+            btn.image = NSImage(systemSymbolName: "circle.slash",
+                                accessibilityDescription: "disabled")?
                         .withSymbolConfiguration(cfg)
             btn.contentTintColor = NSColor.tertiaryLabelColor
         }
@@ -939,12 +1037,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                 dashboardTitle?.stringValue = "\(updates) tool\(updates == 1 ? "" : "s") with updates"
                 dashboardSubtitle?.stringValue = "Click Apply Updates in the toolbar to install."
                 dashboardProgress?.stringValue = ""
-                // populate the per-section list
-                for row in sectionRows where row.status == .hasUpdates {
-                    let label = NSTextField(labelWithString: dashboardRowText(for: row))
-                    label.font = NSFont.systemFont(ofSize: 13)
-                    label.textColor = NSColor.labelColor
-                    dashboardUpdatesList?.addArrangedSubview(label)
+                // per-section list — clickable, jumps to that section's log
+                for (i, row) in sectionRows.enumerated() where row.status == .hasUpdates {
+                    let item = NSButton(title: dashboardRowText(for: row),
+                                        target: self, action: #selector(jumpToSection(_:)))
+                    item.tag = i
+                    item.isBordered = false
+                    item.bezelStyle = .inline
+                    item.contentTintColor = NSColor.labelColor
+                    item.font = NSFont.systemFont(ofSize: 13)
+                    item.alignment = .left
+                    item.focusRingType = .none
+                    dashboardUpdatesList?.addArrangedSubview(item)
                 }
             } else {
                 dashboardIcon?.image = NSImage(systemSymbolName: "checkmark.seal.fill",
@@ -1084,7 +1188,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         for i in 0..<sectionRows.count {
             sectionRows[i].offset = 0
             sectionRows[i].updateCount = 0
-            markRow(i, status: .pending)
+            // keep user-disabled tools visibly off; everything else → pending
+            markRow(i, status: Settings.isEnabled(toolList[i].id) ? .pending : .disabled)
         }
         activeSectionIndex = nil
         sectionStorages = [NSTextStorage()]
@@ -1359,4 +1464,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
+
+/// NSMenu that remembers which sidebar section row it belongs to, so the shared
+/// menuNeedsUpdate delegate can build per-section items (run/scan/enable).
+final class SectionMenu: NSMenu {
+    var index: Int = 0
 }
