@@ -50,12 +50,10 @@ lipo -create \
     -output "$APP/Contents/MacOS/UpdateAll"
 rm "$APP/Contents/MacOS/UpdateAll.x86_64" "$APP/Contents/MacOS/UpdateAll.arm64"
 
-# bundle the helper scripts so the .app is self-contained:
-#  - features.sh: sudo / Touch ID / sudoers management (osascript/authopen)
-#  - *.py:        registry + sparkle bridges (ported to Swift in Phase 4)
+# bundle features.sh (sudo / Touch ID / sudoers management — osascript/authopen).
+# All other logic is now native Swift; no Python bridges or update-all*.sh.
 cp "$DIR/features.sh" "$APP/Contents/Resources/"
 chmod +x "$APP/Contents/Resources/features.sh"
-cp "$DIR"/Sources/Resources/*.py "$APP/Contents/Resources/" 2>/dev/null || true
 
 # regenerate icon if missing, then bundle
 if [[ ! -f "$DIR/AppIcon.icns" ]]; then
