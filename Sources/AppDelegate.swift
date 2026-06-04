@@ -35,8 +35,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     private var currentRunMode: Coordinator.Mode = .scan
     private var sectionRows: [SectionRow] = []
     private var activeSectionIndex: Int?
-    private var sectionSpinnerFrame: Int = 0
-    private var sectionSpinnerTimer: Timer?
+    private var sectionSpinnerTimer: Timer?   // retained for invalidate() call sites; never scheduled now
     // One log buffer per section. Index 0 is the preamble (output before the
     // first section header). Index N (N>=1) corresponds to sectionRows[N-1].
     // The textView's layoutManager swaps between these so only one section's
@@ -684,11 +683,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
             textView.layoutManager?.replaceTextStorage(sectionStorages[newLiveIdx])
         }
         refreshDashboard()
-        if sectionSpinnerTimer == nil {
-            sectionSpinnerTimer = Timer.scheduledTimer(timeInterval: 0.12, target: self,
-                                                      selector: #selector(tickSectionSpinner),
-                                                      userInfo: nil, repeats: true)
-        }
     }
 
     func appendConsole(_ text: String) { append(text) }
@@ -877,10 +871,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                         .withSymbolConfiguration(cfg)
             btn.contentTintColor = NSColor.tertiaryLabelColor
         case .active:
-            // trailing braille frame animates via tickSectionSpinner; the
-            // SF Symbol stays as a rotating-arrows icon for static identity
-            let glyph = Self.spinnerGlyphs[sectionSpinnerFrame % Self.spinnerGlyphs.count]
-            btn.title = " \(title)  \(glyph)"
+            // the rotating-arrows SF Symbol (accent) is the activity indicator
+            btn.title = " " + title
             btn.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath",
                                 accessibilityDescription: "running")?
                         .withSymbolConfiguration(cfg)
@@ -892,7 +884,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                         .withSymbolConfiguration(cfg)
             btn.contentTintColor = NSColor.systemGreen
         case .hasUpdates:
-            btn.title = " " + title
+            // show the update count as a trailing badge in the row
+            let n = sectionRows[idx].updateCount
+            btn.title = n > 0 ? " \(title)   \(n)" : " " + title
             btn.image = NSImage(systemSymbolName: "arrow.up.circle.fill",
                                 accessibilityDescription: "updates available")?
                         .withSymbolConfiguration(cfg)
@@ -1002,7 +996,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         // including .skipped (not installed / disabled / already up to date).
         let total = sectionRows.count
         let done = sectionRows.filter {
-            $0.status == .done || $0.status == .hasUpdates || $0.status == .skipped
+            switch $0.status {
+            case .done, .hasUpdates, .skipped, .disabled: return true   // terminal states
+            case .pending, .active: return false
+            }
         }.count
         let updates = sectionRows.filter { $0.status == .hasUpdates }.count
         let busy = isScriptRunning
@@ -1273,14 +1270,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     /// Legacy alias kept for any leftover wiring — runs a full install pass.
     @objc func rerun() { installAction() }
 
-    @objc private func tickSectionSpinner() {
-        guard let idx = activeSectionIndex else { return }
-        sectionSpinnerFrame = (sectionSpinnerFrame + 1) % Self.spinnerGlyphs.count
-        let glyph = Self.spinnerGlyphs[sectionSpinnerFrame]
-        sectionRows[idx].button.title = "\(glyph)  \(sectionRows[idx].title)"
-    }
-
-
     @objc private func jumpToSection(_ sender: NSButton) {
         guard sender.tag >= 0, sender.tag < sectionRows.count else { return }
         let row = sectionRows[sender.tag]
@@ -1377,7 +1366,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     // Spinner-erase bookkeeping (the active-section sidebar spinner communicates
     // "still working"; no in-console ghost line is rendered).
     private var spinnerVisible: Bool = false
-    private static let spinnerGlyphs = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
     func openLog() {
         let dir = NSHomeDirectory() + "/Library/Logs"
