@@ -19,7 +19,10 @@ struct BrewFormulaeTool: Tool {
 
     func install(_ ctx: RunContext) async -> InstallOutcome {
         _ = await ctx.capture(["brew", "update"])
-        let status = await ctx.run(["brew", "upgrade", "--formula", "--quiet"])
+        // Drop --quiet + force sequential downloads so each bottle shows a
+        // single live \r-updated progress line (same as the cask section).
+        let status = await ctx.run(["brew", "upgrade", "--formula"],
+                                   env: ["HOMEBREW_DOWNLOAD_CONCURRENCY": "1"])
         return status == 0 ? .ok : .failed("brew upgrade exited \(status)")
     }
 }
