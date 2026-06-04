@@ -44,13 +44,15 @@ struct BrewCasksTool: Tool {
     func install(_ ctx: RunContext) async -> InstallOutcome {
         await restoreDriftedCasks(ctx)
 
-        // Upgrade, filtering brew's download-progress frame lines (they'd pile
-        // up after ANSI stripping) and tee'ing to a log we parse for "stuck"
-        // cask errors afterward.
+        // Upgrade with live download progress. We force SEQUENTIAL downloads
+        // (concurrency=1) so brew renders a single \r-updated progress line
+        // (which the console handles in place) instead of the concurrent
+        // multi-bar UI that used ANSI cursor moves and piled up after stripping.
+        // tee to a log we parse for "stuck" cask errors afterward.
         let log = NSTemporaryDirectory() + "ua-cask-\(UUID().uuidString).log"
-        let filter = "grep --line-buffered -vE 'Cask [a-zA-Z0-9_-]+ \\([0-9][0-9.]*\\)[[:space:]]+(Downloading|Downloaded|Verifying|Verified)'"
-        let cmd = "brew upgrade --cask --greedy --quiet 2>&1 | \(filter) | tee '\(log)'"
-        let status = await ctx.run(["/bin/sh", "-c", cmd])
+        let cmd = "brew upgrade --cask --greedy 2>&1 | tee '\(log)'"
+        let status = await ctx.run(["/bin/sh", "-c", cmd],
+                                   env: ["HOMEBREW_DOWNLOAD_CONCURRENCY": "1"])
 
         let logText = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(atPath: log)

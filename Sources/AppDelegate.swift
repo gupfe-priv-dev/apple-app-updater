@@ -1405,8 +1405,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     ]
 
     func append(_ raw: String) {
+        // Treat "cursor to column 1" (ESC[G / ESC[0G / ESC[1G) as a carriage
+        // return so a progress bar that redraws with it (instead of \r) still
+        // overwrites its line in place rather than appending.
+        let normalized = raw
+            .replacingOccurrences(of: "\u{1b}[G",  with: "\r")
+            .replacingOccurrences(of: "\u{1b}[0G", with: "\r")
+            .replacingOccurrences(of: "\u{1b}[1G", with: "\r")
         let cleaned = Self.ansi.stringByReplacingMatches(
-            in: raw, range: NSRange(raw.startIndex..., in: raw), withTemplate: "")
+            in: normalized, range: NSRange(normalized.startIndex..., in: normalized), withTemplate: "")
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\u{04}", with: "")   // PTY EOF control char
             .replacingOccurrences(of: "^D", with: "")       // PTY EOF display form
