@@ -1,68 +1,125 @@
-#!/usr/bin/env zsh
+#!/bin/bash
+# install.sh — downloads and installs UpdateAll from the latest GitHub Release.
+#
+# Usage:
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/gupfe-priv-dev/apple-app-updater/main/install.sh)"
+#
+# What it does:
+#   • fetches the latest release zip
+#   • strips com.apple.quarantine so macOS doesn't show "downloaded from
+#     the internet" / "cannot verify developer" on first launch
+#   • copies the .app to /Applications, replacing any prior install
+#   • re-registers with Launch Services and launches the app
+#
+# For source-clone / development installs (build from this repo + LaunchAgent +
+# Touch ID + sudoers prompts), use ./setup.sh instead.
+
 set -euo pipefail
-DIR="${0:A:h}"
-ME=$(whoami)
 
-echo "==> Building UpdateAll.app..."
-"$DIR/build-app.sh"
+REPO="gupfe-priv-dev/apple-app-updater"
+APP_NAME="UpdateAll"
+DEST="/Applications/$APP_NAME.app"
 
-echo ""
-echo "==> Registering UpdateAll.app with Launch Services..."
-# build-app.sh now installs to /Applications and re-registers; we re-register
-# again here so a Launch Services hiccup doesn't leave bundle-id lookup stale.
-/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
-    -f "/Applications/UpdateAll.app"
-echo "    ✓ Registered (bundle id: com.gunnar.update-all)"
-
-echo ""
-echo "==> Installing LaunchAgent (run at login)..."
-cp "$DIR/com.gunnar.update-all.plist" ~/Library/LaunchAgents/
-launchctl unload ~/Library/LaunchAgents/com.gunnar.update-all.plist 2>/dev/null || true
-launchctl load ~/Library/LaunchAgents/com.gunnar.update-all.plist 2>/dev/null || true
-echo "    ✓ Loaded"
-
-echo ""
-echo ""
-echo "==> Optional: Touch ID for sudo"
-cat <<'EOF'
-    What it does:  sudo (used by the updater for softwareupdate / installer) can
-                   authenticate via fingerprint or Apple Watch instead of a typed password.
-    Without it:    every sudo invocation prompts for your typed password.
-    Reversible:    yes — via the app's "Features" menu, or "features.sh touchid disable".
-EOF
-_ans=""
-read -q "?    Enable Touch ID for sudo? [y/N] " _ans 2>/dev/null || true; echo ""
-if [[ "$_ans" == [yY] ]]; then
-  "$DIR/features.sh" touchid enable
-  echo "    ✓ enabled"
+# ── Language detection ────────────────────────────────────────────────────────
+PRIMARY_LANG=$(defaults read -g AppleLanguages 2>/dev/null | grep -m1 -o '"[a-z][a-z]' | tr -d '"' || echo "en")
+if [[ "$PRIMARY_LANG" == "de" ]]; then
+    T_TITLE="UpdateAll  Installation"
+    T_FETCHING="  Neueste Version wird ermittelt..."
+    T_DOWNLOADING="  Wird heruntergeladen"
+    T_QUESTION="  UpdateAll in /Applications installieren?"
+    T_YES="    [J]  Ja  — jetzt installieren  (empfohlen)"
+    T_NO="    [N]  Nein — abbrechen"
+    T_YES_KEYS="^[JjYy]"
+    T_PROMPT="  Ihre Wahl [J/n]: "
+    T_ABORTED="  Abgebrochen."
+    T_INSTALLING="  Installiere in /Applications..."
+    T_INSTALLED="  ✓  Installiert."
+    T_LAUNCHING="  Wird gestartet..."
+    T_DONE="  Fertig."
+    T_WHATSNEW="  Neuerungen:"
 else
-  echo "    ⊘ skipped"
+    T_TITLE="UpdateAll  Installer"
+    T_FETCHING="  Fetching latest release..."
+    T_DOWNLOADING="  Downloading"
+    T_QUESTION="  Install UpdateAll to /Applications?"
+    T_YES="    [Y]  Yes — install now  (recommended)"
+    T_NO="    [N]  No  — cancel"
+    T_YES_KEYS="^[Yy]"
+    T_PROMPT="  Your choice [Y/n]: "
+    T_ABORTED="  Aborted."
+    T_INSTALLING="  Installing to /Applications..."
+    T_INSTALLED="  ✓  Installed."
+    T_LAUNCHING="  Launching..."
+    T_DONE="  Done."
+    T_WHATSNEW="  What's new:"
 fi
 
+# ── Header ────────────────────────────────────────────────────────────────────
 echo ""
-echo "==> Optional: Passwordless sudo for update commands"
-cat <<'EOF'
-    What it does:  /usr/sbin/installer and /usr/sbin/softwareupdate can be run by
-                   you without any prompt (other commands still require auth normally).
-    Without it:    when the updater installs macOS updates it will prompt for your
-                   password (or Touch ID, if enabled above) every time.
-    Reversible:    yes — via the app's "Features" menu, or "features.sh sudoers disable".
-EOF
-_ans=""
-read -q "?    Enable passwordless sudo for updates? [y/N] " _ans 2>/dev/null || true; echo ""
-if [[ "$_ans" == [yY] ]]; then
-  "$DIR/features.sh" sudoers enable
-  echo "    ✓ enabled"
-else
-  echo "    ⊘ skipped"
+echo "  ╔═══════════════════════════════════╗"
+echo "  ║  $T_TITLE  ║"
+echo "  ╚═══════════════════════════════════╝"
+echo ""
+
+# ── Fetch latest release info ─────────────────────────────────────────────────
+echo "$T_FETCHING"
+LATEST_JSON=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
+TAG=$(echo "$LATEST_JSON" | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+ZIP_URL=$(echo "$LATEST_JSON" | grep '"browser_download_url"' | grep '\.zip"' | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')
+NOTES=$(echo "$LATEST_JSON" | sed -n 's/.*"body": *"\(.*\)".*/\1/p' | sed 's/\\r\\n/\n/g; s/\\n/\n/g; s/\*\*//g')
+echo "  $TAG"
+if [[ -n "$NOTES" ]]; then
+    echo ""
+    echo "$T_WHATSNEW"
+    echo "$NOTES" | while IFS= read -r line; do [[ -n "$line" ]] && echo "    $line"; done
+fi
+echo ""
+
+# ── Ask user ──────────────────────────────────────────────────────────────────
+echo "$T_QUESTION"
+echo ""
+echo "$T_YES"
+echo "$T_NO"
+echo ""
+read -r -p "$T_PROMPT" answer
+answer="${answer:-Y}"
+echo ""
+
+if [[ ! "$answer" =~ $T_YES_KEYS ]]; then
+    echo "$T_ABORTED"
+    echo ""
+    exit 0
 fi
 
-echo ""
-echo "==> Installing update-all command to ~/.local/bin..."
-mkdir -p ~/.local/bin
-ln -sf "$DIR/update-all.sh" ~/.local/bin/update-all
-echo "    ✓ update-all available in PATH"
+# ── Download ──────────────────────────────────────────────────────────────────
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 
+echo "$T_DOWNLOADING $TAG..."
+curl -fsSL "$ZIP_URL" -o "$TMP/release.zip"
+unzip -q "$TMP/release.zip" -d "$TMP/extracted"
 echo ""
-echo "All done. UpdateAll.app will open automatically at next login."
-echo "Run manually: open /Applications/UpdateAll.app"
+
+# ── Install ───────────────────────────────────────────────────────────────────
+echo "$T_INSTALLING"
+pkill -x "$APP_NAME" 2>/dev/null || true
+sleep 0.5
+rm -rf "$DEST"
+cp -R "$TMP/extracted/$APP_NAME.app" "$DEST"
+# Strip "downloaded from the internet" tag so Gatekeeper doesn't block first launch.
+xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+# Re-register so `open -b com.gunnar.update-all` resolves, and clear any stale
+# App Management TCC entry so the new signature gets a fresh consent prompt.
+/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$DEST" >/dev/null 2>&1 || true
+tccutil reset SystemPolicyAppBundles com.gunnar.update-all >/dev/null 2>&1 || true
+echo "$T_INSTALLED"
+echo ""
+
+# ── Launch ────────────────────────────────────────────────────────────────────
+echo "$T_LAUNCHING"
+open "$DEST"
+echo ""
+
+echo "  ────────────────────────────────────────"
+echo "$T_DONE"
+echo ""
