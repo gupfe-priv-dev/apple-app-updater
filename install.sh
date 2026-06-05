@@ -2,7 +2,12 @@
 # install.sh — downloads and installs UpdateAll from the latest GitHub Release.
 #
 # Usage:
-#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/gupfe-priv-dev/apple-app-updater/main/install.sh)"
+#   /bin/bash -c "$(curl -fsSL https://cdn.jsdelivr.net/gh/gupfe-priv-dev/apple-app-updater@main/install.sh)"
+#
+# (jsDelivr is preferred over raw.githubusercontent.com because some
+# corporate proxies aggressively cache the GitHub raw URL and return
+# stale content. jsDelivr's CDN invalidates per commit and is rarely
+# rate-limited or blocked.)
 #
 # What it does:
 #   • fetches the latest release zip
