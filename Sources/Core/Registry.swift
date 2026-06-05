@@ -232,8 +232,19 @@ enum Registry {
     static func addDeclines(_ tokens: [String]) {
         var set = declinedCasks()
         set.formUnion(tokens)
+        setDeclines(set)
+    }
+
+    /// Overwrite the entire declined-casks file. Use this from the management
+    /// UI when the user removes one or more entries to re-allow them.
+    static func setDeclines(_ set: Set<String>) {
+        let path = AppPaths.state + "/declined-casks.json"
+        if set.isEmpty {
+            try? FileManager.default.removeItem(atPath: path)
+            return
+        }
         if let data = try? JSONSerialization.data(withJSONObject: set.sorted(), options: [.prettyPrinted]) {
-            try? data.write(to: URL(fileURLWithPath: AppPaths.state + "/declined-casks.json"))
+            try? data.write(to: URL(fileURLWithPath: path))
         }
     }
 }

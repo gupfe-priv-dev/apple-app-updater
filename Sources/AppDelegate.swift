@@ -59,6 +59,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         // BEFORE any install runs. Apply Updates in the toolbar triggers
         // the real installer.
         requireAppManagement { [weak self] in self?.coordinator.run(.scan) }
+        // background, throttled once-per-day GitHub release check
+        checkSelfUpdateIfDue()
     }
 
     /// The tools, in display + execution order. Defines the sidebar rows.
@@ -635,6 +637,48 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     }
 
     /// One clickable sidebar row using an SF Symbol + title.
+    /// Marker subclass so we can find / remove an existing badge without
+    /// using NSView.tag (which is get-only on macOS).
+    private final class UpdateCountBadge: NSView {}
+
+    /// macOS-style update-count badge — blue rounded pill with white text,
+    /// pinned to the trailing edge of the row. Mirrors Mail.app unread counts
+    /// / App Store badges. Pass `count = nil` (or 0) to remove it.
+    private func setBadge(on btn: NSButton, count: Int?) {
+        // tear down any previous badge
+        btn.subviews.first(where: { $0 is UpdateCountBadge })?.removeFromSuperview()
+        guard let n = count, n > 0 else { return }
+
+        let badge = UpdateCountBadge()
+        badge.wantsLayer = true
+        badge.layer?.backgroundColor = NSColor.systemBlue.cgColor
+        badge.layer?.cornerRadius = 9
+        badge.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: "\(n)")
+        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .white
+        label.alignment = .center
+        label.drawsBackground = false
+        label.isBezeled = false
+        label.isEditable = false
+        label.isSelectable = false
+        label.translatesAutoresizingMaskIntoConstraints = false
+        badge.addSubview(label)
+        btn.addSubview(badge)
+
+        NSLayoutConstraint.activate([
+            badge.heightAnchor.constraint(equalToConstant: 18),
+            badge.widthAnchor.constraint(greaterThanOrEqualTo: badge.heightAnchor),  // round when 1 digit
+            badge.trailingAnchor.constraint(equalTo: btn.trailingAnchor, constant: -4),
+            badge.centerYAnchor.constraint(equalTo: btn.centerYAnchor),
+            label.centerXAnchor.constraint(equalTo: badge.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: badge.leadingAnchor, constant: 6),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: badge.trailingAnchor, constant: -6),
+        ])
+    }
+
     private func sidebarRow(title: String, systemSymbol: String,
                             target: AnyObject?, action: Selector?,
                             tint: NSColor = NSColor.labelColor) -> NSButton {
@@ -864,6 +908,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         let title = sectionRows[idx].title
         let btn   = sectionRows[idx].button
         let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        // every status except .hasUpdates clears the trailing badge
+        setBadge(on: btn, count: status == .hasUpdates ? sectionRows[idx].updateCount : nil)
         switch status {
         case .pending:
             btn.title = " " + title
@@ -884,9 +930,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                         .withSymbolConfiguration(cfg)
             btn.contentTintColor = NSColor.systemGreen
         case .hasUpdates:
-            // show the update count as a trailing badge in the row
-            let n = sectionRows[idx].updateCount
-            btn.title = n > 0 ? " \(title)   \(n)" : " " + title
+            btn.title = " " + title
             btn.image = NSImage(systemSymbolName: "arrow.up.circle.fill",
                                 accessibilityDescription: "updates available")?
                         .withSymbolConfiguration(cfg)
@@ -1100,7 +1144,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
             item.target = self
             item.action = #selector(showDashboardFromToolbar)
         case Self.toolbarRefreshID:
-            item.label = "Refresh"
+            item.label = "Check"
             item.image = NSImage(systemSymbolName: "arrow.clockwise",
                                  accessibilityDescription: "Refresh (scan only)")?
                          .withSymbolConfiguration(cfg)
@@ -1110,7 +1154,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
             toolbarRefreshItem = item
             lastToolbarSnapshot = nil  // force next updateToolbarState to re-apply
         case Self.toolbarInstallID:
-            item.label = "Apply Updates"
+            item.label = "Update"
             item.image = NSImage(systemSymbolName: "arrow.down.circle.fill",
                                  accessibilityDescription: "Apply all available updates")?
                          .withSymbolConfiguration(cfg)
@@ -1212,7 +1256,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         let busy = isScriptRunning
         switch item.itemIdentifier {
         case Self.toolbarRefreshID: return !busy
-        case Self.toolbarInstallID: return !busy && anyUpdatesAvailable
+        // Update is always enabled when idle — it kicks off a scan implicitly
+        // if no scan has been run yet (sections without `.hasUpdates` will
+        // resolve themselves quickly). No reason to gate it on having a
+        // prior scan result.
+        case Self.toolbarInstallID: return !busy
         case Self.toolbarAbortID:   return busy
         default: return true
         }
@@ -1309,6 +1357,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                                               : "exclamationmark.triangle.fill",
                                     appMgmtOK ? .systemGreen : .systemOrange,
                                     #selector(openAppManagementSettings)),
+            (declinedCasksLabel(), "nosign", .secondaryLabelColor,
+                                    #selector(openDeclinedCasksSheet)),
+            selfUpdateRowEntry(),
             ("Open log",            "doc.text", .secondaryLabelColor, #selector(showLog)),
         ]
         for entry in entries {
@@ -1317,6 +1368,127 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                            target: self, action: entry.sel, tint: entry.tint)
             )
         }
+    }
+
+    private var declinedCasksSheet: DeclinedCasksSheet?
+
+    // MARK: Self-update checker ──────────────────────────────────────────
+
+    /// Cached "newer release available" info. nil = up to date or unknown.
+    private var selfUpdateAvailable: (tag: String, url: String)?
+
+    /// Throttled launch-time check; uses cached state when <24h old.
+    private func checkSelfUpdateIfDue() {
+        let now = Date()
+        if let cached = SelfUpdateChecker.loadState() {
+            if now.timeIntervalSince(cached.lastCheck) < 24 * 3600 {
+                // recent — restore banner state from cache only
+                if let tag = cached.cachedTag,
+                   SelfUpdateChecker.isNewer(remote: tag,
+                                             current: SelfUpdateChecker.currentSemver()) {
+                    selfUpdateAvailable = (tag, cached.cachedURL ?? "")
+                    refreshFeaturesSidebar()
+                }
+                return
+            }
+        }
+        performSelfUpdateCheck(notify: false)
+    }
+
+    @objc func checkForAppUpdate() {
+        performSelfUpdateCheck(notify: true)
+    }
+
+    @objc func openLatestRelease() {
+        if let urlStr = selfUpdateAvailable?.url, let url = URL(string: urlStr) {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSWorkspace.shared.open(SelfUpdateChecker.releasesURL)
+        }
+    }
+
+    private func performSelfUpdateCheck(notify: Bool) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = SelfUpdateChecker.fetchLatest()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch result {
+                case .success(let rel):
+                    let current = SelfUpdateChecker.currentSemver()
+                    let isNew = SelfUpdateChecker.isNewer(remote: rel.tag_name, current: current)
+                    SelfUpdateChecker.saveState(latestTag: rel.tag_name, htmlUrl: rel.html_url)
+                    self.selfUpdateAvailable = isNew ? (rel.tag_name, rel.html_url) : nil
+                    self.refreshFeaturesSidebar()
+                    if notify {
+                        let alert = NSAlert()
+                        if isNew {
+                            alert.messageText = "Update available: \(rel.tag_name)"
+                            alert.informativeText = "You're on \(current). Open the release page to download?"
+                            alert.addButton(withTitle: "Open release page")
+                            alert.addButton(withTitle: "Later")
+                            if alert.runModal() == .alertFirstButtonReturn,
+                               let url = URL(string: rel.html_url) {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } else {
+                            alert.messageText = "Up to date"
+                            alert.informativeText = "You're on \(current), the latest release."
+                            alert.addButton(withTitle: "OK")
+                            alert.runModal()
+                        }
+                    }
+                case .failure(let err):
+                    if notify {
+                        let alert = NSAlert()
+                        alert.messageText = "Couldn't check for app updates"
+                        alert.informativeText = err.message
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                    }
+                }
+            }
+        }
+    }
+    private func declinedCasksLabel() -> String {
+        let n = Registry.declinedCasks().count
+        return n == 0 ? "Declined casks" : "Declined casks (\(n))"
+    }
+    @objc func openDeclinedCasksSheet() {
+        guard let parent = window else { return }
+        let sheet = DeclinedCasksSheet()
+        declinedCasksSheet = sheet   // retain
+        sheet.present(over: parent)
+        // The sheet's Done handler edits the file; refresh the sidebar count
+        // after dismissal so the row label reflects any removals.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.observeSheetClose(parent: parent)
+        }
+    }
+    private func observeSheetClose(parent: NSWindow) {
+        // poll: sheet is dismissed when parent has no attached sheets
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            if parent.attachedSheet == nil {
+                self?.declinedCasksSheet = nil
+                self?.refreshFeaturesSidebar()
+            } else {
+                self?.observeSheetClose(parent: parent)
+            }
+        }
+    }
+
+    /// Build the SETTINGS row for the self-update checker. If a newer
+    /// release is known (via the launch-time check) the row pivots to a
+    /// banner with the version + accent color and links to the release page.
+    private func selfUpdateRowEntry() -> (title: String, symbol: String, tint: NSColor, sel: Selector?) {
+        if let avail = selfUpdateAvailable {
+            return ("App update: \(avail.tag)",
+                    "arrow.up.app.fill",
+                    .systemOrange,
+                    #selector(openLatestRelease))
+        }
+        return ("Check for app updates", "arrow.down.app",
+                .secondaryLabelColor, #selector(checkForAppUpdate))
     }
 
     @objc func quit() { NSApp.terminate(nil) }

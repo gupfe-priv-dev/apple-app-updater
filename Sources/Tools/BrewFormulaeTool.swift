@@ -23,6 +23,16 @@ struct BrewFormulaeTool: Tool {
         // single live \r-updated progress line (same as the cask section).
         let status = await ctx.run(["brew", "upgrade", "--formula"],
                                    env: ["HOMEBREW_DOWNLOAD_CONCURRENCY": "1"])
-        return status == 0 ? .ok : .failed("brew upgrade exited \(status)")
+        // brew exits 1 on non-fatal warnings (deprecations, PATH shadowing)
+        // even when every package upgraded fine. Verify by re-querying:
+        // if nothing's outdated anymore, the upgrade did its job.
+        if status == 0 { return .ok }
+        let after = await ctx.capture(["brew", "outdated", "--formula", "--quiet"])
+        let stillOutdated = after.output
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if stillOutdated.isEmpty { return .ok }
+        return .failed("brew upgrade exited \(status); still outdated: \(stillOutdated.joined(separator: ", "))")
     }
 }
