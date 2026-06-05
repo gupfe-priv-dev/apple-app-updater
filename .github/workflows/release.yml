@@ -81,10 +81,17 @@ jobs:
           SKIP_INSTALL: 1
         run: ./build-app.sh
 
-      - name: Zip the .app
+      - name: Stage release artifact (.app + Install.command)
         run: |
+          mkdir dist
+          mv UpdateAll.app dist/
+          cp Install.command dist/
+          chmod +x dist/Install.command
           ZIP="UpdateAll-${{ steps.compute.outputs.tag }}.zip"
-          ditto -c -k --keepParent UpdateAll.app "$ZIP"
+          # `zip` (not `ditto`) because we need two siblings inside the zip:
+          # the .app bundle AND the Install.command launcher. Codesigned
+          # bundles round-trip through zip just fine on modern macOS.
+          (cd dist && zip -ryq "../$ZIP" .)
           ls -la "$ZIP"
 
       - name: Push tag
