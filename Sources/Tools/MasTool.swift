@@ -21,9 +21,19 @@ struct MasTool: Tool {
                 return !first.isEmpty && first.allSatisfy { $0.isNumber }
             }
             .map { line -> UpdateItem in
-                // format: "<id> <App Name> (<old> -> <new>)"
-                let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
-                return UpdateItem(parts.count == 2 ? parts[1] : line)
+                // format: "<id>  <App Name>  (<old> -> <new>)"
+                // drop the leading id, then split the trailing "(old -> new)".
+                let afterId = line.split(separator: " ", maxSplits: 1)
+                    .last.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? line
+                guard let open = afterId.lastIndex(of: "("), afterId.hasSuffix(")") else {
+                    return UpdateItem(afterId)
+                }
+                let name = String(afterId[..<open]).trimmingCharacters(in: .whitespaces)
+                let versions = afterId[afterId.index(after: open)..<afterId.index(before: afterId.endIndex)]
+                let pair = versions.components(separatedBy: "->").map { $0.trimmingCharacters(in: .whitespaces) }
+                let current = pair.count == 2 ? pair[0] : nil
+                let latest  = pair.count == 2 ? pair[1] : pair.first
+                return UpdateItem(name, current: current, latest: latest)
             }
         return .from(items)
     }

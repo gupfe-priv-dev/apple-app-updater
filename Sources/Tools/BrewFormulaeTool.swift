@@ -9,11 +9,25 @@ struct BrewFormulaeTool: Tool {
     func scan(_ ctx: RunContext) async -> ScanResult {
         // Refresh formulae metadata first so `outdated` is accurate. Silent.
         _ = await ctx.capture(["brew", "update"])
-        let r = await ctx.capture(["brew", "outdated", "--formula", "--quiet"])
+        // --verbose adds the version delta: "name (cur) < latest".
+        let r = await ctx.capture(["brew", "outdated", "--formula", "--verbose"])
         let items = r.output.split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-            .map { UpdateItem($0) }
+            .map { line -> UpdateItem in
+                let fields = line.split(separator: " ").map(String.init)
+                let name = fields.first ?? line
+                var cur: String?
+                if fields.count >= 2, fields[1].hasPrefix("("), fields[1].hasSuffix(")") {
+                    cur = String(fields[1].dropFirst().dropLast())
+                }
+                var latest: String?
+                if let op = fields.firstIndex(where: { $0 == "<" || $0 == "!=" || $0 == ">" }),
+                   op + 1 < fields.count {
+                    latest = fields[op + 1]
+                }
+                return UpdateItem(name, current: cur, latest: latest)
+            }
         return .from(items)
     }
 

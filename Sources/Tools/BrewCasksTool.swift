@@ -10,15 +10,36 @@ struct BrewCasksTool: Tool {
     func isAvailable() -> Bool { commandExists("brew") }
 
     func scan(_ ctx: RunContext) async -> ScanResult {
-        let r = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--quiet"])
-        var tokens = r.output.split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        // --verbose adds the version delta: "token (cur) != latest".
+        let r = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--verbose"])
+        let parsed = r.output.split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            .compactMap(parseOutdatedLine)
         // Drop "installer manual" casks (e.g. battle-net): brew lists them as
         // outdated under --greedy but refuses to upgrade them, so they'd show
         // a perpetual "update available" that Apply Updates can never clear.
-        let manual = await manualInstallerCasks(tokens, ctx)
-        tokens = tokens.filter { !manual.contains($0) }
-        return .from(tokens.map { UpdateItem($0) })
+        let manual = await manualInstallerCasks(parsed.map { $0.token }, ctx)
+        let items = parsed.filter { !manual.contains($0.token) }
+            .map { UpdateItem($0.token, current: $0.cur, latest: $0.latest) }
+        return .from(items)
+    }
+
+    /// Parse a `brew outdated --verbose` line: "token (cur) != latest".
+    /// Cask versions can carry a ",<hash>" metadata suffix — trimmed for display.
+    private func parseOutdatedLine(_ line: String) -> (token: String, cur: String?, latest: String?)? {
+        let fields = line.split(separator: " ").map(String.init)
+        guard let token = fields.first else { return nil }
+        func display(_ v: String) -> String { String(v.split(separator: ",").first ?? Substring(v)) }
+        var cur: String?
+        if fields.count >= 2, fields[1].hasPrefix("("), fields[1].hasSuffix(")") {
+            cur = display(String(fields[1].dropFirst().dropLast()))
+        }
+        var latest: String?
+        if let op = fields.firstIndex(where: { $0 == "!=" || $0 == "<" || $0 == ">" }),
+           op + 1 < fields.count {
+            latest = display(fields[op + 1])
+        }
+        return (token, cur, latest)
     }
 
     /// Of the given cask tokens, which are `installer manual` (brew can't

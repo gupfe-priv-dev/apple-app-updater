@@ -30,6 +30,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         var status: SectionStatus
         var offset: Int  // textStorage position when it became active
         var updateCount: Int = 0   // # of updates available (when status == .hasUpdates)
+        var items: [UpdateItem] = []   // the scanned updates (for the dashboard version list)
     }
     private enum SectionStatus { case pending, active, done, hasUpdates, skipped, disabled }
     private var currentRunMode: Coordinator.Mode = .scan
@@ -519,6 +520,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
             // area; this gives the spacer something to expand into so
             // SETTINGS gets pushed to the bottom
             sidebarBody.heightAnchor.constraint(greaterThanOrEqualTo: sidebarScroll.contentView.heightAnchor),
+            // Stretch the sections stack to the full content width (minus the
+            // 12pt left/right insets) so each row's trailing edge is the right
+            // margin — that's where the count badges pin. Headers stay leading
+            // at their natural width (untouched by this).
+            sectionsStack.widthAnchor.constraint(equalTo: sidebarBody.widthAnchor, constant: -24),
         ])
 
         // ── Main pane (right): three overlaid views (only one visible) ──
@@ -578,11 +584,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         split.addArrangedSubview(sidebarBackdrop)
         split.addArrangedSubview(mainContainer)
         split.setHoldingPriority(.defaultLow, forSubviewAt: 1)
-        let sidebarPreferred = sidebarBackdrop.widthAnchor.constraint(equalToConstant: 260)
+        // Size the sidebar so the widest section title plus its trailing count
+        // badge always fits — otherwise long rows (e.g. "Sparkle updates
+        // (unmanaged apps)") would run under the badge. Measured from the row
+        // font; the user can still drag wider up to the max.
+        let needed = requiredSidebarWidth()
+        let sidebarPreferred = sidebarBackdrop.widthAnchor.constraint(equalToConstant: needed)
         sidebarPreferred.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            sidebarBackdrop.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
-            sidebarBackdrop.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
+            sidebarBackdrop.widthAnchor.constraint(greaterThanOrEqualToConstant: needed),
+            sidebarBackdrop.widthAnchor.constraint(lessThanOrEqualToConstant: needed + 100),
             sidebarPreferred,
         ])
 
@@ -679,6 +690,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         ])
     }
 
+    /// Minimum sidebar width that fits the widest section title at the row font
+    /// plus the icon, insets, and a reserve for the trailing count badge.
+    private func requiredSidebarWidth() -> CGFloat {
+        let font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        let widestTitle = toolList.map { tool -> CGFloat in
+            ((" " + tool.title) as NSString).size(withAttributes: [.font: font]).width
+        }.max() ?? 160
+        // 12 left inset + ~22 icon/gap + title + ~38 badge reserve + 12 right inset
+        return ceil(widestTitle + 84)
+    }
+
     private func sidebarRow(title: String, systemSymbol: String,
                             target: AnyObject?, action: Selector?,
                             tint: NSColor = NSColor.labelColor) -> NSButton {
@@ -736,11 +758,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         switch result.state {
         case .hasUpdates:
             sectionRows[idx].updateCount = result.items.count
+            sectionRows[idx].items = result.items
             markRow(idx, status: .hasUpdates)
         case .unavailable:
             markRow(idx, status: .skipped)
         case .upToDate, .unknown:
             sectionRows[idx].updateCount = 0
+            sectionRows[idx].items = []
             markRow(idx, status: .done)
         }
         activeSectionIndex = nil
@@ -876,6 +900,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
             let menu = SectionMenu(); menu.index = i; menu.delegate = self
             btn.menu = menu
             sectionsStack.addArrangedSubview(btn)
+            // Stretch the row to the full sidebar width so its trailing edge is
+            // the right margin — the count badge pins there (an "invisible
+            // column" on the right). The title stays left-aligned, so text and
+            // badge never collide. Also enlarges the click target.
+            btn.translatesAutoresizingMaskIntoConstraints = false
+            btn.widthAnchor.constraint(equalTo: sectionsStack.widthAnchor).isActive = true
             sectionRows.append(SectionRow(title: tool.title, button: btn,
                                           status: .pending, offset: 0))
             // reflect persisted "disabled" state on launch
@@ -1078,20 +1108,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
                                        .withSymbolConfiguration(bigCfg)
                 dashboardIcon?.contentTintColor = NSColor.systemOrange
                 dashboardTitle?.stringValue = "\(updates) tool\(updates == 1 ? "" : "s") with updates"
-                dashboardSubtitle?.stringValue = "Click Apply Updates in the toolbar to install."
+                dashboardSubtitle?.stringValue = "Click Update in the toolbar to install."
                 dashboardProgress?.stringValue = ""
-                // per-section list — clickable, jumps to that section's log
+                // Native grouped list: a section header per tool, then one row
+                // per update showing its version delta (current → latest).
+                // Each row is clickable and jumps to that section's log.
+                let cap = 6   // keep the centered list from overflowing tall
                 for (i, row) in sectionRows.enumerated() where row.status == .hasUpdates {
-                    let item = NSButton(title: dashboardRowText(for: row),
-                                        target: self, action: #selector(jumpToSection(_:)))
-                    item.tag = i
-                    item.isBordered = false
-                    item.bezelStyle = .inline
-                    item.contentTintColor = NSColor.labelColor
-                    item.font = NSFont.systemFont(ofSize: 13)
-                    item.alignment = .left
-                    item.focusRingType = .none
-                    dashboardUpdatesList?.addArrangedSubview(item)
+                    dashboardUpdatesList?.addArrangedSubview(makeSectionHeaderRow(row, index: i))
+                    for item in row.items.prefix(cap) {
+                        dashboardUpdatesList?.addArrangedSubview(makeUpdateItemRow(item, index: i))
+                    }
+                    if row.items.count > cap {
+                        dashboardUpdatesList?.addArrangedSubview(
+                            makeMoreRow(row.items.count - cap, index: i))
+                    }
                 }
             } else {
                 dashboardIcon?.image = NSImage(systemSymbolName: "checkmark.seal.fill",
@@ -1109,11 +1140,128 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         }
     }
 
-    private func dashboardRowText(for row: SectionRow) -> String {
-        if row.updateCount > 0 {
-            return "↑  \(row.title)  —  \(row.updateCount) update\(row.updateCount == 1 ? "" : "s")"
+    // MARK: native dashboard update rows ─────────────────────────────────
+    // Built from real subviews (NSImageView + NSTextField in stacks), not
+    // formatted strings — so the latest version can be tinted green, columns
+    // align, and the whole row is a hover-highlighted click target.
+
+    private static let dashRowWidth: CGFloat = 480
+
+    /// A clickable dashboard row that jumps to its section's log on click and
+    /// highlights on hover. `content` is laid out inset within it.
+    final class DashboardRow: NSView {
+        var sectionIndex = 0
+        weak var owner: AppDelegate?
+        override var wantsUpdateLayer: Bool { true }
+        override func mouseDown(with event: NSEvent) { owner?.jumpToSectionIndex(sectionIndex) }
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: bounds,
+                options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                owner: self, userInfo: nil))
         }
-        return "↑  \(row.title)"
+        override func mouseEntered(with event: NSEvent) {
+            layer?.backgroundColor = NSColor.selectedContentBackgroundColor
+                .withAlphaComponent(0.20).cgColor
+        }
+        override func mouseExited(with event: NSEvent) { layer?.backgroundColor = .clear }
+        override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    }
+
+    private func dashLabel(_ s: String, size: CGFloat, color: NSColor,
+                           weight: NSFont.Weight = .regular) -> NSTextField {
+        let t = NSTextField(labelWithString: s)
+        t.font = NSFont.systemFont(ofSize: size, weight: weight)
+        t.textColor = color
+        t.lineBreakMode = .byTruncatingTail
+        return t
+    }
+
+    private func dashSpacer() -> NSView {
+        let v = NSView()
+        v.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return v
+    }
+
+    /// Wrap a content view in a clickable, hover-highlighting DashboardRow.
+    private func wrapRow(_ content: NSView, index: Int, leadingInset: CGFloat) -> DashboardRow {
+        let row = DashboardRow()
+        row.sectionIndex = index
+        row.owner = self
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+        content.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(content)
+        NSLayoutConstraint.activate([
+            row.widthAnchor.constraint(equalToConstant: Self.dashRowWidth),
+            row.heightAnchor.constraint(greaterThanOrEqualToConstant: 26),
+            content.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: leadingInset),
+            content.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
+            content.topAnchor.constraint(equalTo: row.topAnchor, constant: 4),
+            content.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -4),
+        ])
+        return row
+    }
+
+    /// Section header: ↑ icon + tool title + "N updates" on the right.
+    private func makeSectionHeaderRow(_ row: SectionRow, index: Int) -> NSView {
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "arrow.up.circle.fill",
+                             accessibilityDescription: "updates")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold))
+        icon.contentTintColor = .systemOrange
+        let title = dashLabel(row.title, size: 13, color: .labelColor, weight: .semibold)
+        let count = dashLabel("\(row.updateCount) update\(row.updateCount == 1 ? "" : "s")",
+                              size: 12, color: .secondaryLabelColor)
+        let stack = NSStackView(views: [icon, title, dashSpacer(), count])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 6
+        return wrapRow(stack, index: index, leadingInset: 10)
+    }
+
+    /// One update: name on the left, version delta (current → latest) on the
+    /// right with the latest version in green.
+    private func makeUpdateItemRow(_ item: UpdateItem, index: Int) -> NSView {
+        let name = dashLabel(item.name, size: 13, color: .labelColor)
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let stack = NSStackView(views: [name, dashSpacer()])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 6
+        if let delta = versionDeltaView(item) { stack.addArrangedSubview(delta) }
+        return wrapRow(stack, index: index, leadingInset: 32)
+    }
+
+    /// "+N more…" overflow row.
+    private func makeMoreRow(_ n: Int, index: Int) -> NSView {
+        let label = dashLabel("+\(n) more…", size: 12, color: .tertiaryLabelColor)
+        let stack = NSStackView(views: [label, dashSpacer()])
+        stack.orientation = .horizontal
+        return wrapRow(stack, index: index, leadingInset: 32)
+    }
+
+    /// `current → latest` as real subviews (latest tinted green). Returns nil
+    /// when no version info was captured for the item.
+    private func versionDeltaView(_ item: UpdateItem) -> NSView? {
+        guard let latest = item.latest else { return nil }
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 5
+        if let cur = item.current, cur != latest {
+            stack.addArrangedSubview(dashLabel(cur, size: 12, color: .secondaryLabelColor))
+            let arrow = NSImageView()
+            arrow.image = NSImage(systemSymbolName: "arrow.right", accessibilityDescription: "to")?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold))
+            arrow.contentTintColor = .tertiaryLabelColor
+            stack.addArrangedSubview(arrow)
+        }
+        stack.addArrangedSubview(dashLabel(latest, size: 12, color: .systemGreen, weight: .semibold))
+        return stack
     }
 
     // MARK: NSToolbarDelegate ────────────────────────────────────────────
@@ -1231,6 +1379,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
         for i in 0..<sectionRows.count {
             sectionRows[i].offset = 0
             sectionRows[i].updateCount = 0
+            sectionRows[i].items = []
             // keep user-disabled tools visibly off; everything else → pending
             markRow(i, status: Settings.isEnabled(toolList[i].id) ? .pending : .disabled)
         }
@@ -1319,10 +1468,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSToolbarDel
     @objc func rerun() { installAction() }
 
     @objc private func jumpToSection(_ sender: NSButton) {
-        guard sender.tag >= 0, sender.tag < sectionRows.count else { return }
-        let row = sectionRows[sender.tag]
+        jumpToSectionIndex(sender.tag)
+    }
+
+    /// Switch the console to section `idx`'s log. Shared by the sidebar buttons
+    /// and the native dashboard rows.
+    fileprivate func jumpToSectionIndex(_ idx: Int) {
+        guard idx >= 0, idx < sectionRows.count else { return }
+        let row = sectionRows[idx]
         guard row.status != .pending else { return }    // hasn't run yet
-        let storageIdx = sender.tag + 1
+        let storageIdx = idx + 1
         guard storageIdx < sectionStorages.count else { return }
         displayedSectionIdx = storageIdx
         followLive = (storageIdx == liveSectionIdx)
