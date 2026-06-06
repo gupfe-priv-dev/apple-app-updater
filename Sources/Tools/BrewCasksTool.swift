@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 /// Homebrew casks — full path: drift recovery for interrupted installs, the
 /// greedy upgrade (with download-spinner frames filtered out), stuck-cask
@@ -64,6 +65,9 @@ struct BrewCasksTool: Tool {
 
     func install(_ ctx: RunContext) async -> InstallOutcome {
         await restoreDriftedCasks(ctx)
+        // Quit apps that are about to be replaced while open (updating a running
+        // app can leave it glitchy until restart). Relaunched after the upgrade.
+        let relaunch = await quitRunningApps(ctx)
 
         // Upgrade with live download progress. We force SEQUENTIAL downloads
         // (concurrency=1) so brew renders a single \r-updated progress line
@@ -84,7 +88,109 @@ struct BrewCasksTool: Tool {
         await handleDisabledCasks(in: logText, ctx)
         await stripQuarantine(ctx)
         await cleanup(ctx)
+        await relaunchApps(relaunch, ctx)
         return status == 0 ? .ok : .failed("brew upgrade --cask exited \(status)")
+    }
+
+    // MARK: running apps ──────────────────────────────────────────────────
+
+    /// Apps a pending cask upgrade would replace while they're open. Updating a
+    /// running app — especially a Chromium browser, which loads resources lazily
+    /// from its bundle — can break the live instance until it's relaunched. So
+    /// we offer to quit them cleanly first; the returned names are relaunched
+    /// once the upgrade finishes.
+    private func quitRunningApps(_ ctx: RunContext) async -> [String] {
+        let outdated = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--quiet"])
+        var tokens = outdated.output.split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        // manual-installer casks (e.g. battle-net) won't actually be upgraded,
+        // so don't bother asking the user to quit them.
+        let manual = await manualInstallerCasks(tokens, ctx)
+        tokens = tokens.filter { !manual.contains($0) }
+        guard !tokens.isEmpty else { return [] }
+
+        let appsByToken = await caskAppArtifacts(tokens, ctx)
+        let running = runningAppBundleNames()
+        var openApps = Set<String>()                          // "Brave Browser.app"
+        for (_, apps) in appsByToken {
+            for app in apps where running.contains(app) { openApps.insert(app) }
+        }
+        let display = openApps.map { $0.removingSuffix(".app") }.sorted()
+        guard !display.isEmpty else { return [] }
+
+        ctx.line("")
+        ctx.line("⚠ These apps are open and about to be updated:")
+        for d in display { ctx.line("   • \(d)") }
+        ctx.line("  Updating an app while it's running can leave it glitchy until you")
+        ctx.line("  restart it. Best to quit them first — they'll reopen after updating.")
+        guard await ctx.ask("Quit \(display.count) running app(s) and relaunch after updating? "
+                            + "(\(display.joined(separator: ", ")))") else {
+            ctx.line("⊘ Left open — restart any that misbehave after the update.")
+            return []
+        }
+
+        var quit: [String] = []
+        for app in display {
+            ctx.line("⏻ Quitting \(app)…")
+            _ = await ctx.capture(["osascript", "-e", "tell application \"\(app)\" to quit"])
+            if await waitForQuit(app) { quit.append(app) }
+            else { ctx.line("   (\(app) didn't quit — updating in place; restart it if needed)") }
+        }
+        return quit
+    }
+
+    /// token → app-bundle names it installs, from the cask's `app` artifacts.
+    private func caskAppArtifacts(_ tokens: [String], _ ctx: RunContext) async -> [String: [String]] {
+        guard !tokens.isEmpty else { return [:] }
+        let r = await ctx.capture(["brew", "info", "--cask", "--json=v2"] + tokens)
+        guard let data = r.output.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let casks = obj["casks"] as? [[String: Any]] else { return [:] }
+        var map: [String: [String]] = [:]
+        for c in casks {
+            guard let token = c["token"] as? String else { continue }
+            var apps: [String] = []
+            for art in (c["artifacts"] as? [[String: Any]]) ?? [] {
+                // an "app" artifact is a list whose first element is the bundle
+                // name (later elements may carry a {target:…} rename dict).
+                for entry in (art["app"] as? [Any]) ?? [] {
+                    if let name = entry as? String, name.hasSuffix(".app") { apps.append(name) }
+                }
+            }
+            if !apps.isEmpty { map[token] = apps }
+        }
+        return map
+    }
+
+    /// Bundle names ("Brave Browser.app") of every currently-running app.
+    private func runningAppBundleNames() -> Set<String> {
+        var names = Set<String>()
+        for app in NSWorkspace.shared.runningApplications {
+            if let comp = app.bundleURL?.lastPathComponent { names.insert(comp) }
+        }
+        return names
+    }
+
+    /// Poll until the named app has terminated (or timeout). `name` is the
+    /// display name without ".app".
+    private func waitForQuit(_ name: String, timeout: Double = 6) async -> Bool {
+        let bundle = name + ".app"
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeout {
+            if !runningAppBundleNames().contains(bundle) { return true }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        return !runningAppBundleNames().contains(bundle)
+    }
+
+    /// Reopen the apps we quit before upgrading.
+    private func relaunchApps(_ names: [String], _ ctx: RunContext) async {
+        guard !names.isEmpty else { return }
+        ctx.line("")
+        for name in names {
+            ctx.line("↻ Relaunching \(name)…")
+            _ = await ctx.capture(["open", "-a", name])
+        }
     }
 
     // MARK: disabled casks ────────────────────────────────────────────────
