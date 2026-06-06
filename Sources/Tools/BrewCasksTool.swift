@@ -81,9 +81,50 @@ struct BrewCasksTool: Tool {
             ctx.line("✓ All casks up to date")
         }
         await handleStuckCasks(in: logText, ctx)
+        await handleDisabledCasks(in: logText, ctx)
         await stripQuarantine(ctx)
         await cleanup(ctx)
         return status == 0 ? .ok : .failed("brew upgrade --cask exited \(status)")
+    }
+
+    // MARK: disabled casks ────────────────────────────────────────────────
+
+    /// A cask brew has *disabled* (its upstream source is gone) can never be
+    /// upgraded — brew just prints a "Deprecated or disabled package" warning
+    /// on every run. The local app still works but is frozen; often a
+    /// replacement now lives elsewhere (e.g. the Mac App Store). Detect these
+    /// from the upgrade log and offer to remove the dead brew cask.
+    private func handleDisabledCasks(in log: String, _ ctx: RunContext) async {
+        var disabled = Set<String>()
+        for raw in log.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            // trailer rows: "send-to-kindle (disabled)"
+            if line.hasSuffix("(disabled)") {
+                let token = String(line.dropLast("(disabled)".count)).trimmingCharacters(in: .whitespaces)
+                if !token.isEmpty && !token.contains(" ") { disabled.insert(token) }
+            }
+            // warning rows: "Warning: Not upgrading <token>, it is disabled because…"
+            else if line.hasPrefix("Warning: Not upgrading "),
+                    let cut = line.range(of: ", it is disabled") {
+                let start = line.index(line.startIndex, offsetBy: "Warning: Not upgrading ".count)
+                disabled.insert(String(line[start..<cut.lowerBound]))
+            }
+        }
+        let tokens = disabled.sorted()
+        guard !tokens.isEmpty else { return }
+        ctx.line("")
+        ctx.line("⚠ Disabled upstream — brew can't upgrade these (the source is gone):")
+        for t in tokens { ctx.line("   • \(t)") }
+        ctx.line("  The installed copy still works but is frozen. If a replacement exists")
+        ctx.line("  elsewhere (e.g. the Mac App Store), you can drop the stale brew cask.")
+        if await ctx.ask("Uninstall \(tokens.count) disabled cask(s)? (\(tokens.joined(separator: ", ")))") {
+            for t in tokens {
+                ctx.line("✗ brew uninstall --cask \(t)")
+                _ = await ctx.run(["brew", "uninstall", "--cask", t])
+            }
+        } else {
+            ctx.line("⊘ Kept — brew will keep showing the disabled warning until removed.")
+        }
     }
 
     // MARK: drift recovery ────────────────────────────────────────────────

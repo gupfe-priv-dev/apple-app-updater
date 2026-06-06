@@ -95,12 +95,21 @@ enum Registry {
 
         let brewManaged = brewManagedApps()
         let masManaged  = masManagedApps()
-        let managed = Set(brewManaged.keys).union(masManaged.keys)
         let installed = Set((try? fm.contentsOfDirectory(atPath: appsDir))?.filter { $0.hasSuffix(".app") } ?? [])
+
+        // App Store apps are detected by the receipt every MAS download carries
+        // (Contents/_MASReceipt/receipt) — NOT by name. `mas list` reports the
+        // store's display name (e.g. "Kindle"), which often differs from the
+        // bundle on disk (e.g. "Amazon Kindle.app"); name-matching alone would
+        // then mis-file such apps as "unmanaged". The receipt is authoritative.
+        let appStore = installed.filter {
+            fm.fileExists(atPath: "\(appsDir)/\($0)/Contents/_MASReceipt/receipt")
+        }
+        let managed = Set(brewManaged.keys).union(masManaged.keys).union(appStore)
         let unmanaged = installed.subtracting(managed)
 
         emit("  \(installed.count) apps in /Applications\n")
-        emit("  brew: \(brewManaged.count)  mas: \(masManaged.count)  unmanaged: \(unmanaged.count)\n")
+        emit("  brew: \(brewManaged.count)  mas: \(appStore.count)  unmanaged: \(unmanaged.count)\n")
 
         var registry = load()
         var changed = false
