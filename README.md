@@ -39,7 +39,17 @@ The registry is cached in `apps.json` next to the script. Only unmanaged apps ar
 
 ---
 
-## Setup
+## Install
+
+One-liner — downloads the latest release, strips the macOS quarantine xattr, and installs to `/Applications`:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://cdn.jsdelivr.net/gh/gupfe-priv-dev/apple-app-updater@main/install.sh)"
+```
+
+> The URL uses **jsDelivr** instead of `raw.githubusercontent.com` because some corporate proxies aggressively cache the GitHub raw URL and return stale content. jsDelivr's CDN invalidates per commit. The script itself is open — read it before you pipe it.
+
+After install, launch from Spotlight or `open /Applications/UpdateAll.app`. The app's built-in self-update checker hits the GitHub Releases API once per 24 h and surfaces newer releases in its SETTINGS sidebar.
 
 ### Prerequisites
 
@@ -47,24 +57,27 @@ The registry is cached in `apps.json` next to the script. Only unmanaged apps ar
 brew install mas
 ```
 
-### Install
+`mas` is the Mac App Store CLI; if it's missing the MAS section is skipped silently.
+
+### Source / development install
+
+If you've cloned the repo and want to build + register a LaunchAgent locally:
 
 ```bash
-./install.sh
+./setup.sh
 ```
 
-`install.sh` does everything in one shot — two macOS password dialogs will appear (for writing system files):
+`setup.sh` does everything in one shot — two macOS password dialogs will appear (for writing system files):
 
 | Step | What it does |
 |------|-------------|
-| Build | Compiles `UpdateAll.swift` → `UpdateAll.app`, ad-hoc code-signs it |
+| Build | Compiles `Sources/**/*.swift` → universal `UpdateAll.app`, ad-hoc code-signs it |
 | LaunchAgent | Registers the app to open automatically at login |
 | Touch ID for sudo | Writes `/etc/pam.d/sudo_local` so `sudo` prompts with Touch ID instead of a password |
 | NOPASSWD sudoers | Writes `/etc/sudoers.d/update-all` so `installer` and `softwareupdate` need no prompt at all |
-| PATH | Symlinks `update-all` into `~/.local/bin` for CLI use |
 
-After install, `UpdateAll.app` opens at every login with no sudo prompts.
-Run manually anytime: `open UpdateAll.app` or `update-all` in a terminal.
+After setup, `UpdateAll.app` opens at every login with no sudo prompts.
+Run manually anytime: `open /Applications/UpdateAll.app`.
 
 ---
 

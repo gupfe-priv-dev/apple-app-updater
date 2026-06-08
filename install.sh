@@ -101,7 +101,20 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 echo "$T_DOWNLOADING $TAG..."
-curl -fsSL "$ZIP_URL" -o "$TMP/release.zip"
+# Retries + generous timeouts because some corporate proxies (e.g. FortiClient)
+# 504 the first attempt while their anti-malware scanner inspects the binary.
+# `--retry-all-errors` retries on HTTP errors too (not just transient TCP).
+if ! curl -fsSL \
+       --retry 4 --retry-delay 3 --retry-all-errors \
+       --connect-timeout 30 --max-time 180 \
+       "$ZIP_URL" -o "$TMP/release.zip"; then
+    echo ""
+    echo "  ✗ Download failed."
+    echo "    URL: $ZIP_URL"
+    echo "    Open it in your browser, save the zip, drop UpdateAll.app into"
+    echo "    /Applications, then run:  xattr -dr com.apple.quarantine /Applications/UpdateAll.app"
+    exit 1
+fi
 unzip -q "$TMP/release.zip" -d "$TMP/extracted"
 echo ""
 
