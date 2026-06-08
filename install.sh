@@ -42,6 +42,7 @@ if [[ "$PRIMARY_LANG" == "de" ]]; then
     T_LAUNCHING="  Wird gestartet..."
     T_DONE="  Fertig."
     T_WHATSNEW="  Neuerungen:"
+    T_UPTODATE="  ✓ Bereits aktuell — nichts zu tun."
 else
     T_TITLE="UpdateAll  Installer"
     T_FETCHING="  Fetching latest release..."
@@ -57,6 +58,7 @@ else
     T_LAUNCHING="  Launching..."
     T_DONE="  Done."
     T_WHATSNEW="  What's new:"
+    T_UPTODATE="  ✓ Already up to date — nothing to do."
 fi
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -73,6 +75,23 @@ TAG=$(echo "$LATEST_JSON" | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)
 ZIP_URL=$(echo "$LATEST_JSON" | grep '"browser_download_url"' | grep '\.zip"' | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')
 NOTES=$(echo "$LATEST_JSON" | sed -n 's/.*"body": *"\(.*\)".*/\1/p' | sed 's/\\r\\n/\n/g; s/\\n/\n/g; s/\*\*//g')
 echo "  $TAG"
+
+# ── Already up to date? ───────────────────────────────────────────────────────
+# Compare bundled CFBundleShortVersionString's leading semver (e.g. "1.3.8"
+# from "1.3.8 (47fdcca, 2026-06-06 10:44)") against the release tag's
+# numeric portion. If equal, short-circuit — no reinstall, no prompt.
+INSTALLED_SHORT=""
+if [[ -d "/Applications/$APP_NAME.app" ]]; then
+    INSTALLED_SHORT=$(defaults read "/Applications/$APP_NAME.app/Contents/Info" CFBundleShortVersionString 2>/dev/null | awk '{print $1}')
+fi
+TAG_VER="${TAG#v}"
+if [[ -n "$INSTALLED_SHORT" && "$INSTALLED_SHORT" == "$TAG_VER" ]]; then
+    echo ""
+    echo "$T_UPTODATE"
+    echo ""
+    exit 0
+fi
+
 if [[ -n "$NOTES" ]]; then
     echo ""
     echo "$T_WHATSNEW"
