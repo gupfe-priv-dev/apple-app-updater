@@ -11,6 +11,7 @@ struct BrewCasksTool: Tool {
     func isAvailable() -> Bool { commandExists("brew") }
 
     func scan(_ ctx: RunContext) async -> ScanResult {
+        await BrewTapTrust.ensure(ctx)
         // --verbose adds the version delta: "token (cur) != latest".
         let r = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--verbose"])
         let parsed = r.output.split(separator: "\n")

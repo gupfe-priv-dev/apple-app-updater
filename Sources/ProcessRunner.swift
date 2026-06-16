@@ -30,6 +30,8 @@ final class ProcessRunner: @unchecked Sendable {
         env["HOMEBREW_NO_EMOJI"]           = "1"
         env["HOMEBREW_NO_AUTO_UPDATE"]     = "1"
         env["HOMEBREW_NO_INSTALL_CLEANUP"] = "1"
+        // brew 4.6+ made --ask the default; skip the "Do you want to proceed?" prompt.
+        env["HOMEBREW_NO_ASK"]             = "1"
         return env
     }
 
