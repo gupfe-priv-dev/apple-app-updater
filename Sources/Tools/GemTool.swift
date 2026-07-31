@@ -41,14 +41,19 @@ struct GemTool: Tool {
 
     func install(_ ctx: RunContext) async -> InstallOutcome {
         guard let gem = gemPath() else { return .unavailable }
-        _ = await ctx.capture([gem, "update", "--system"])
-        let r = await ctx.capture([gem, "update"])
+        // --no-document: RubyGems runs its RDoc hook in-process, so a newer rdoc
+        // gem loaded next to Ruby's older default rdoc raises ArgumentError and
+        // aborts the whole update mid-list — gems after the failure never get
+        // updated, even though the one being built installed fine. We don't want
+        // ri/rdoc output anyway.
+        _ = await ctx.capture([gem, "update", "--system", "--no-document"])
+        let r = await ctx.capture([gem, "update", "--no-document"])
         let lines = clean(r.output)
         if lines.isEmpty || lines.contains(where: { $0.contains("Nothing to update") }) {
             ctx.line("✓ All gems up to date")
         } else {
             for l in lines { ctx.emit(l + "\n") }
         }
-        return .ok
+        return r.status == 0 ? .ok : .failed("gem update exited \(r.status)")
     }
 }
