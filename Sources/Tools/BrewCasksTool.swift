@@ -70,27 +70,65 @@ struct BrewCasksTool: Tool {
         // app can leave it glitchy until restart). Relaunched after the upgrade.
         let relaunch = await quitRunningApps(ctx)
 
-        // Upgrade with live download progress. We force SEQUENTIAL downloads
-        // (concurrency=1) so brew renders a single \r-updated progress line
-        // (which the console handles in place) instead of the concurrent
-        // multi-bar UI that used ANSI cursor moves and piled up after stripping.
-        // tee to a log we parse for "stuck" cask errors afterward.
-        let log = NSTemporaryDirectory() + "ua-cask-\(UUID().uuidString).log"
-        let cmd = "brew upgrade --cask --greedy 2>&1 | tee '\(log)'"
-        let status = await ctx.run(["/bin/sh", "-c", cmd],
-                                   env: ["HOMEBREW_DOWNLOAD_CONCURRENCY": "1"])
+        // Which casks are actually outdated (greedy), minus manual-installer
+        // casks brew won't auto-upgrade anyway.
+        let outdated = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--quiet"])
+        var tokens = outdated.output.split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let manual = await manualInstallerCasks(tokens, ctx)
+        tokens = tokens.filter { !manual.contains($0) }
 
+        // Disabled casks are never "outdated", so we won't try to upgrade them —
+        // but still offer to remove the dead ones. A --dry-run surfaces the
+        // "disabled" warnings without downloading anything.
+        let dry = await ctx.capture(["/bin/sh", "-c",
+                                     "brew upgrade --cask --greedy --dry-run 2>&1"])
+        await handleDisabledCasks(in: dry.output, ctx)
+
+        if tokens.isEmpty {
+            ctx.line("✓ All casks up to date")
+            await stripQuarantine(ctx)
+            await cleanup(ctx)
+            await relaunchApps(relaunch, ctx)
+            return .ok
+        }
+
+        // Upgrade each cask on its OWN command. brew's batch upgrade prefetches
+        // every download first and aborts the whole run if any single one fails
+        // (e.g. makemkv's host was unreachable) — so one bad cask took down all
+        // the others. Per-cask isolates failures. Sequential downloads
+        // (concurrency=1) keep a single \r-updated progress line. tee -a to one
+        // log so the stuck-cask detector still sees everything.
+        let log = NSTemporaryDirectory() + "ua-cask-\(UUID().uuidString).log"
+        var failed: [String] = []
+        for token in tokens {
+            ctx.line("")
+            ctx.line("==> Upgrading \(token)")
+            let cmd = "brew upgrade --cask --greedy '\(token)' 2>&1 | tee -a '\(log)'"
+            let status = await ctx.run(["/bin/sh", "-c", cmd],
+                                       env: ["HOMEBREW_DOWNLOAD_CONCURRENCY": "1"])
+            if status != 0 { failed.append(token) }
+        }
         let logText = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(atPath: log)
-        if logText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            ctx.line("✓ All casks up to date")
-        }
+
         await handleStuckCasks(in: logText, ctx)
-        await handleDisabledCasks(in: logText, ctx)
         await stripQuarantine(ctx)
         await cleanup(ctx)
         await relaunchApps(relaunch, ctx)
-        return status == 0 ? .ok : .failed("brew upgrade --cask exited \(status)")
+
+        if !failed.isEmpty {
+            ctx.line("")
+            ctx.line("⚠ \(failed.count) cask\(failed.count == 1 ? "" : "s") failed — the rest upgraded fine:")
+            for t in failed { ctx.line("   • \(t)") }
+            ctx.line("  Usually transient (network) or a deprecated cask; will retry next run.")
+        }
+        // Only a hard failure if EVERY cask failed; a partial failure still
+        // applied the others, so don't flag the whole section red.
+        if failed.count == tokens.count {
+            return .failed("all \(tokens.count) cask upgrade(s) failed: \(failed.joined(separator: ", "))")
+        }
+        return .ok
     }
 
     // MARK: running apps ──────────────────────────────────────────────────
@@ -257,6 +295,12 @@ struct BrewCasksTool: Tool {
             else if !missing.isEmpty { partial.append((token, missing.sorted(), present.sorted())) }
         }
 
+        // Don't re-prompt for casks the user already declined to reinstall —
+        // they removed the app on purpose. (If they later `brew uninstall` it,
+        // it stops being brew-managed and drops out of this list anyway.)
+        let declined = Registry.declinedReinstalls()
+        missingTotal = missingTotal.filter { !declined.contains($0.token) }
+
         if !partial.isEmpty {
             ctx.line("ℹ Cask bundles with SOME apps removed (treating as deliberate, not reinstalling):")
             for p in partial {
@@ -282,7 +326,10 @@ struct BrewCasksTool: Tool {
                 _ = await ctx.run(["brew", "reinstall", "--cask", "--force", "--quiet", m.token])
             }
         } else {
-            ctx.line("⊘ Skipped — brew metadata still references the missing bundle(s).")
+            // Remember the decline so these aren't re-offered every run.
+            Registry.addDeclinedReinstalls(missingTotal.map { $0.token })
+            ctx.line("⊘ Skipped — won't ask again (manage via Declined casks). "
+                     + "brew metadata still references the missing bundle(s).")
         }
     }
 

@@ -33,6 +33,27 @@ enum Registry {
         return Set(arr)
     }
 
+    // Drift-reinstall declines: cask tokens whose apps are missing but the user
+    // chose NOT to reinstall (deliberate removal). Persisted so we don't nag on
+    // every run. Kept separate from declinedCasks (which suppresses cask
+    // *suggestions* for unmanaged apps).
+    private static var declinedReinstallsPath: String { AppPaths.state + "/declined-reinstalls.json" }
+
+    static func declinedReinstalls() -> Set<String> {
+        guard let data = FileManager.default.contents(atPath: declinedReinstallsPath),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [String] else { return [] }
+        return Set(arr)
+    }
+
+    /// Remember that the user declined reinstalling these drifted casks.
+    static func addDeclinedReinstalls(_ tokens: [String]) {
+        var set = declinedReinstalls()
+        set.formUnion(tokens)
+        if let data = try? JSONSerialization.data(withJSONObject: set.sorted(), options: [.prettyPrinted]) {
+            try? data.write(to: URL(fileURLWithPath: declinedReinstallsPath))
+        }
+    }
+
     /// /Applications/*.app names → cask token, for every installed cask
     /// (reading both `app:` artifacts and uninstall.delete paths).
     static func brewManagedApps() -> [String: String] {
