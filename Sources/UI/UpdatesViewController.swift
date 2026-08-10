@@ -182,7 +182,10 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
 
     private func buildTable() {
         table.usesAlternatingRowBackgroundColors = true
-        table.style = .inset
+        // .fullWidth, not .inset: the inset style rounds and insets each row,
+        // which is right for a sidebar but turns a mostly-empty data table into
+        // a column of floating pills. Full width gives the classic stripes.
+        table.style = .fullWidth
         table.rowHeight = 22
         table.allowsMultipleSelection = true
         table.allowsColumnReordering = false
@@ -329,7 +332,10 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         let busy = isBusy
         let selected = selectedCount
         checkButton.isEnabled = !busy
-        selectAllButton.isEnabled = !busy && selected < rows.count
+        // Only rows that are still pending can be selected, so that's what
+        // decides whether Select All has anything left to do.
+        let selectable = rows.filter { !$0.didSucceed }.count
+        selectAllButton.isEnabled = !busy && selected < selectable
         deselectAllButton.isEnabled = !busy && selected > 0
         styleUpdateButton(title: selected > 0 ? "Update Selected (\(selected))" : "Update Selected",
                           enabled: !busy && selected > 0)
@@ -421,7 +427,9 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
     func deselectAll() { setAllSelected(false) }
 
     private func setAllSelected(_ on: Bool) {
-        for row in rows { row.isSelected = on }
+        // Skip rows that already updated in this run — Select All shouldn't
+        // resurrect finished work.
+        for row in rows where !row.didSucceed { row.isSelected = on }
         table.reloadData()
         refreshCounts()
     }
@@ -653,9 +661,21 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             }
             emptyLabel.stringValue = "Everything is up to date."
         } else {
-            let stillPending = rows.filter { !$0.didSucceed }.count
-            setStatus(stillPending == 0 ? "Updates complete."
-                                        : "Updates complete — \(stillPending) still pending.")
+            // Rows that updated are no longer pending work, so they leave the
+            // table — it lists what's outstanding, not a history. They stayed
+            // visible with their ✓ for the duration of the run, and the console
+            // and log keep the record.
+            let done = rows.filter { $0.didSucceed }.count
+            rows.removeAll { $0.didSucceed }
+            let stillPending = rows.count
+            switch (done, stillPending) {
+            case (0, _):
+                setStatus("Nothing was updated.")
+            case (_, 0):
+                setStatus("Updated \(done) package\(done == 1 ? "" : "s").")
+            default:
+                setStatus("Updated \(done) — \(stillPending) still pending.")
+            }
             emptyLabel.stringValue = "Everything is up to date."
         }
         emptyLabel.isHidden = !rows.isEmpty
@@ -822,9 +842,14 @@ extension UpdatesViewController: NSTableViewDataSource, NSTableViewDelegate {
             cell.action = #selector(checkboxToggled(_:))
             cell.tag = row
             cell.state = item.isSelected ? .on : .off
-            cell.isEnabled = !isBusy
-            cell.toolTip = item.targetable ? nil
-                : "\(item.managerLabel) updates everything at once — these rows toggle together."
+            // A row that already updated in this run is a receipt, not pending
+            // work — leave it visible but not re-checkable, so it can't be
+            // queued again for something that's already done.
+            cell.isEnabled = !isBusy && !item.didSucceed
+            cell.toolTip = item.didSucceed
+                ? "Already updated in this run — press Check for Updates to rescan."
+                : (item.targetable ? nil
+                   : "\(item.managerLabel) updates everything at once — these rows toggle together.")
             return cell
         }
 

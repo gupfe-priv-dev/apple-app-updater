@@ -33,23 +33,80 @@ struct GemTool: Tool {
         }
     }
 
-    /// `gem outdated` prints "name (current < latest)" — split it so the table
-    /// gets a bare gem name and a real version delta instead of one blob.
-    private func parse(_ line: String) -> UpdateItem {
-        let name = String(line.split(separator: " ").first ?? Substring(line))
-        guard let open = line.firstIndex(of: "("), line.hasSuffix(")") else {
-            return UpdateItem(name)
+    /// Installed gems and their newest local version, from `gem list`.
+    /// Format: "name (1.2.3, 1.2.2, default: 1.0.0)".
+    private func installedGems(_ ctx: RunContext, _ gem: String) async -> [(name: String, version: String)] {
+        let r = await ctx.capture([gem, "list", "--local", "--no-details"])
+        return clean(r.output).compactMap { line -> (String, String)? in
+            guard let open = line.firstIndex(of: "("), line.hasSuffix(")") else { return nil }
+            let name = String(line[line.startIndex..<open]).trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, !name.contains(" ") else { return nil }
+            let inner = line[line.index(after: open)..<line.index(before: line.endIndex)]
+            // Newest first; "default: x" entries are Ruby's bundled copies and
+            // are always older than a real install, so they're skipped.
+            let versions = inner.components(separatedBy: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.hasPrefix("default:") }
+            guard let newest = versions.first, !newest.isEmpty else { return nil }
+            return (name, newest)
         }
-        let inner = line[line.index(after: open)..<line.index(before: line.endIndex)]
-        let pair = inner.components(separatedBy: "<").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard pair.count == 2 else { return UpdateItem(name) }
-        return UpdateItem(name, current: pair[0], latest: pair[1])
     }
 
+    /// Latest published version of one gem, from the RubyGems API.
+    private func latestVersion(of name: String) async -> String? {
+        guard let escaped = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "https://rubygems.org/api/v1/versions/\(escaped)/latest.json")
+        else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.setValue("UpdateAll", forHTTPHeaderField: "User-Agent")
+        let data: Data? = await withCheckedContinuation { cont in
+            URLSession.shared.dataTask(with: req) { d, _, _ in cont.resume(returning: d) }.resume()
+        }
+        guard let data = data,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = obj["version"] as? String,
+              version != "unknown" else { return nil }
+        return version
+    }
+
+    /// `gem outdated` asks rubygems.org about each installed gem one at a time,
+    /// which took ~60s for 85 gems here — nearly all of it waiting on the
+    /// network. Listing locally is instant, so we do that and then look the
+    /// versions up concurrently, which turns a minute into a couple of seconds.
     func scan(_ ctx: RunContext) async -> ScanResult {
         guard let gem = gemPath() else { return .unavailable }
-        let r = await ctx.capture([gem, "outdated"])
-        return .from(clean(r.output).map(parse))
+        let installed = await installedGems(ctx, gem)
+        guard !installed.isEmpty else { return .upToDate }
+
+        var items: [UpdateItem] = []
+        var failures = 0
+        // Bounded concurrency: enough to hide the latency, not so much that we
+        // hammer rubygems.org from one machine.
+        let batchSize = 12
+        for batch in stride(from: 0, to: installed.count, by: batchSize).map({
+            Array(installed[$0..<min($0 + batchSize, installed.count)])
+        }) {
+            await withTaskGroup(of: (String, String, String?).self) { group in
+                for g in batch {
+                    group.addTask { (g.name, g.version, await latestVersion(of: g.name)) }
+                }
+                for await (name, current, latest) in group {
+                    guard let latest = latest else { failures += 1; continue }
+                    if Version.sortV(latest, current) == 1 {
+                        items.append(UpdateItem(name, current: current, latest: latest))
+                    }
+                }
+            }
+        }
+
+        // Never let a batch of failed lookups read as "everything is current".
+        if failures > 0 {
+            ctx.line("! couldn't check \(failures) of \(installed.count) gems (network?)")
+        }
+        if items.isEmpty && failures == installed.count {
+            return .unknown("couldn't reach rubygems.org")
+        }
+        return .from(items.sorted { $0.name < $1.name })
     }
 
     var supportsTargetedInstall: Bool { true }
