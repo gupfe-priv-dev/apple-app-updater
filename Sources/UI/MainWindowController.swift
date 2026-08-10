@@ -1,15 +1,19 @@
 import AppKit
 
-/// Owns the window, its toolbar, and the two tabs. Toolbar buttons are the only
-/// controls that act on a run, so this is also where "is a run in progress"
-/// gets translated into enabled/disabled state.
+/// Owns the main window and its toolbar. Toolbar buttons are the only controls
+/// that act on a run, so this is also where "is a run in progress" gets
+/// translated into enabled/disabled state.
+///
+/// Settings live in their own ⌘, window (the macOS convention) rather than a
+/// second tab: the main window is about the table and the console, and nothing
+/// in Settings is content you'd flip back and forth to.
 @MainActor
 final class MainWindowController: NSObject, NSToolbarDelegate, NSWindowDelegate {
 
     let window: NSWindow
     let updates: UpdatesViewController
     let settings: SettingsViewController
-    private let tabs = NSTabViewController()
+    private var settingsWindow: NSWindow?
 
     private var checkItem: NSToolbarItem?
     private var updateItem: NSToolbarItem?
@@ -39,17 +43,9 @@ final class MainWindowController: NSObject, NSToolbarDelegate, NSWindowDelegate 
             backing: .buffered, defer: false)
         super.init()
 
-        let updatesTab = NSTabViewItem(viewController: updates)
-        updatesTab.label = "Updates"
-        let settingsTab = NSTabViewItem(viewController: settings)
-        settingsTab.label = "Settings"
-        tabs.tabStyle = .segmentedControlOnTop
-        tabs.addTabViewItem(updatesTab)
-        tabs.addTabViewItem(settingsTab)
-
         window.title = "Update All"
         window.titlebarAppearsTransparent = false
-        window.contentViewController = tabs
+        window.contentViewController = updates
         window.setContentSize(NSSize(width: 1020, height: 680))
         window.minSize = NSSize(width: 820, height: 480)
         window.delegate = self
@@ -151,14 +147,29 @@ final class MainWindowController: NSObject, NSToolbarDelegate, NSWindowDelegate 
 
     // MARK: actions ──────────────────────────────────────────────────────
 
-    @objc private func check() {
-        tabs.selectedTabViewItemIndex = 0
-        updates.scan()
-    }
+    @objc private func check() { updates.scan() }
 
-    @objc private func update() {
-        tabs.selectedTabViewItemIndex = 0
-        updates.updateSelected()
+    @objc private func update() { updates.updateSelected() }
+
+    /// Settings, in a panel of its own. Reused across opens so it keeps its
+    /// position, and refreshed each time since feature state (Touch ID,
+    /// sudoers) can change outside the app.
+    @objc func showSettings() {
+        if settingsWindow == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),
+                             styleMask: [.titled, .closable, .resizable],
+                             backing: .buffered, defer: false)
+            w.title = "Update All Settings"
+            w.contentViewController = settings
+            w.isReleasedWhenClosed = false      // we keep and reuse it
+            w.minSize = NSSize(width: 480, height: 360)
+            w.setFrameAutosaveName("UpdateAllSettingsWindow")
+            w.center()
+            settingsWindow = w
+        }
+        settings.rebuild()
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func selectAll() { updates.selectAll() }

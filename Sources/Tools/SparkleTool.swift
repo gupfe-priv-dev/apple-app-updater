@@ -8,38 +8,89 @@ struct SparkleTool: Tool {
     let title = "Sparkle updates (unmanaged apps)"
     func isAvailable() -> Bool { true }
 
-    func scan(_ ctx: RunContext) async -> ScanResult {
-        .unknown("feeds checked on install")
+    /// Every tracked Sparkle app with its installed version and feed.
+    private func trackedApps() -> [(name: String, display: String, feed: String, installed: String)] {
+        Registry.load()
+            .sorted(by: { $0.key < $1.key })
+            .compactMap { name, entry in
+                guard entry.manager == "sparkle",
+                      let feed = entry.feed_url, !feed.isEmpty else { return nil }
+                let installed = Plist.value("/Applications/\(name)/Contents/Info.plist",
+                                            "CFBundleShortVersionString") ?? "?"
+                return (name, name.removingSuffix(".app"), feed, installed)
+            }
     }
 
+    /// Sparkle feeds are just XML over HTTP, so a scan is a real scan — fetch
+    /// each appcast and compare. (This used to report "unknown, checked on
+    /// install", which cost the table a row that couldn't say anything.)
+    func scan(_ ctx: RunContext) async -> ScanResult {
+        AppPaths.ensure()
+        let apps = trackedApps()
+        guard !apps.isEmpty else { return .upToDate }
+
+        var items: [UpdateItem] = []
+        for app in apps {
+            guard let (latest, _) = await Appcast.fetch(app.feed) else {
+                // Never let an unreachable feed read as "up to date".
+                ctx.line("✗ \(app.display): feed unreachable")
+                continue
+            }
+            if Version.sortV(latest, app.installed) == 1 {
+                items.append(UpdateItem(app.display, token: app.name,
+                                        current: app.installed, latest: latest))
+            }
+        }
+        return .from(items)
+    }
+
+    var supportsTargetedInstall: Bool { true }
+
     func install(_ ctx: RunContext) async -> InstallOutcome {
+        await upgrade(ctx, only: nil)
+    }
+
+    func install(_ ctx: RunContext, only items: [UpdateItem]) async -> InstallOutcome {
+        await upgrade(ctx, only: Set(items.map { $0.token }))
+    }
+
+    /// `only` holds app bundle names ("Amphetamine Enhancer.app"); nil = all.
+    private func upgrade(_ ctx: RunContext, only: Set<String>?) async -> InstallOutcome {
         AppPaths.ensure()
         var registry = Registry.load()
-        let appsDir = "/Applications"
         var checked = 0
+        var failed: [String] = []
 
-        for (name, entry) in registry.sorted(by: { $0.key < $1.key }) {
-            guard entry.manager == "sparkle" else { continue }
+        for app in trackedApps() {
+            if let only = only, !only.contains(app.name) { continue }
             checked += 1
-            let display = name.removingSuffix(".app")
-            let installedVer = Plist.value("\(appsDir)/\(name)/Contents/Info.plist", "CFBundleShortVersionString") ?? "?"
-            guard let feed = entry.feed_url, !feed.isEmpty else { ctx.line("? \(name): no feed URL"); continue }
+            let (name, display, feed, installedVer) = (app.name, app.display, app.feed, app.installed)
 
-            guard let (latest, url) = Appcast.fetch(feed) else { ctx.line("✗ \(display): feed unreachable"); continue }
+            guard let (latest, url) = await Appcast.fetch(feed) else {
+                ctx.line("✗ \(display): feed unreachable")
+                failed.append(name)
+                continue
+            }
             // newer iff latest sorts strictly after installed
             if Version.sortV(latest, installedVer) != 1 {
                 ctx.line("✓ \(display) \(installedVer)")
                 continue
             }
             ctx.line("↑ \(display): \(installedVer) → \(latest)")
-            guard let url = url else { ctx.line("  no download URL — skipping"); continue }
+            guard let url = url else {
+                ctx.line("  no download URL — skipping")
+                failed.append(name)
+                continue
+            }
             if await install(url: url, newVersion: latest, ctx: ctx) {
                 registry[name]?.last_version = latest
                 Registry.save(registry)
+            } else {
+                failed.append(name)
             }
         }
         if checked == 0 { ctx.line("✓ No Sparkle apps tracked") }
-        return .ok
+        return .partial(failed)
     }
 
     /// Download + install one Sparkle update. Returns true on success.
@@ -105,14 +156,18 @@ struct SparkleTool: Tool {
 /// https:// Sparkle namespace variants (both use the "sparkle" prefix).
 final class Appcast: NSObject, XMLParserDelegate {
     /// Returns (best version, download URL) or nil if unreachable/unparseable.
-    static func fetch(_ feedURL: String) -> (String, String?)? {
+    ///
+    /// Async rather than semaphore-blocking: tools run on the main actor, and a
+    /// blocking wait here froze the whole UI for up to 12s per tracked app.
+    static func fetch(_ feedURL: String) async -> (String, String?)? {
         guard let url = URL(string: feedURL) else { return nil }
         var req = URLRequest(url: url, timeoutInterval: 10)
         req.setValue("Sparkle/2.0", forHTTPHeaderField: "User-Agent")
-        let sem = DispatchSemaphore(value: 0)
-        var payload: Data?
-        URLSession.shared.dataTask(with: req) { d, _, _ in payload = d; sem.signal() }.resume()
-        _ = sem.wait(timeout: .now() + 12)
+        let payload: Data? = await withCheckedContinuation { cont in
+            URLSession.shared.dataTask(with: req) { d, _, _ in
+                cont.resume(returning: d)
+            }.resume()
+        }
         guard let data = payload else { return nil }
 
         let p = Appcast()

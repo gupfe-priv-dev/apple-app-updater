@@ -17,11 +17,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         AppPaths.ensure()
         buildToolList()
-        buildMenu()
 
         main = MainWindowController(tools: toolList, appDelegate: self)
         coordinator = Coordinator(host: main.updates)
         main.updates.coordinator = coordinator
+        // After `main` exists — the Settings menu item targets it.
+        buildMenu()
         main.show()
 
         offerSudoersFixIfNeeded()
@@ -279,16 +280,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: menu ─────────────────────────────────────────────────────────
 
     func buildMenu() {
-        let main = NSMenu()
+        let menuBar = NSMenu()
 
         // Application menu (first item — title shown as app name)
         let appItem = NSMenuItem()
-        main.addItem(appItem)
+        menuBar.addItem(appItem)
         let appMenu = NSMenu()
         appItem.submenu = appMenu
         appMenu.addItem(withTitle: "About Update All",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        // ⌘, — where every macOS app keeps its settings.
+        let settingsItem = NSMenuItem(title: "Settings…",
+                                      action: #selector(MainWindowController.showSettings),
+                                      keyEquivalent: ",")
+        settingsItem.target = self.main
+        appMenu.addItem(settingsItem)
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Update All",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -296,7 +304,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Edit menu — without it, Cmd+C in the console and Cmd+F don't work.
         let editItem = NSMenuItem()
         editItem.title = "Edit"
-        main.addItem(editItem)
+        menuBar.addItem(editItem)
         let editMenu = NSMenu(title: "Edit")
         editItem.submenu = editMenu
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
@@ -305,12 +313,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Features menu
         let featuresItem = NSMenuItem()
         featuresItem.title = "Features"
-        main.addItem(featuresItem)
+        menuBar.addItem(featuresItem)
         featuresMenu = NSMenu(title: "Features")
         featuresMenu.delegate = self
         featuresItem.submenu = featuresMenu
 
-        NSApp.mainMenu = main
+        NSApp.mainMenu = menuBar
     }
 
     /// Refresh the Features menu each time it opens so labels reflect state.

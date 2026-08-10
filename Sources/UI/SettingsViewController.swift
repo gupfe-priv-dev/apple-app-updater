@@ -9,7 +9,14 @@ final class SettingsViewController: NSViewController {
     let toolList: [Tool]
     weak var appDelegate: AppDelegate?
 
-    private let content = NSStackView()
+    /// Flipped so the scroll view's origin is top-left. An unflipped document
+    /// view opens scrolled to the *bottom* of the stack, which reads as an
+    /// empty pane when the content is taller than the window.
+    private final class FlippedStack: NSStackView {
+        override var isFlipped: Bool { true }
+    }
+
+    private let content = FlippedStack()
     private var managerBoxes: [(id: String, box: NSButton)] = []
     private var hiddenList: NSStackView!
 
