@@ -55,6 +55,22 @@ enum Settings {
         excludedItems = s
     }
 
+    // MARK: behaviour ────────────────────────────────────────────────────
+
+    private static let scanOnLaunchKey = "scanOnLaunch"
+
+    /// Scan automatically when the app opens. On by default — UpdateAll runs at
+    /// login, and a launch that reports nothing until you press a button would
+    /// miss the point. Off is for anyone who wants it purely on demand (and
+    /// makes a rebuild-test loop much faster).
+    static var scanOnLaunch: Bool {
+        get {
+            guard defaults.object(forKey: scanOnLaunchKey) != nil else { return true }
+            return defaults.bool(forKey: scanOnLaunchKey)
+        }
+        set { defaults.set(newValue, forKey: scanOnLaunchKey) }
+    }
+
     // MARK: layout ───────────────────────────────────────────────────────
 
     /// Remembered console height so the split doesn't reset every launch.

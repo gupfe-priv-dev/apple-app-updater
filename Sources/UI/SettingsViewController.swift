@@ -71,7 +71,8 @@ final class SettingsViewController: NSViewController {
     func rebuild() {
         content.arrangedSubviews.forEach { $0.removeFromSuperview() }
         wrappingLabels.removeAll()
-        for card in [managersCard(), systemCard(), hiddenCard(), maintenanceCard()] {
+        for card in [behaviourCard(), managersCard(), systemCard(),
+                     hiddenCard(), maintenanceCard()] {
             content.addArrangedSubview(card)
             // Width is pinned only once the card is actually in the hierarchy —
             // a constraint between views with no common ancestor yet throws.
@@ -100,6 +101,22 @@ final class SettingsViewController: NSViewController {
     private var wrappingLabels: [NSTextField] = []
 
     // MARK: cards ────────────────────────────────────────────────────────
+
+    private func behaviourCard() -> NSView {
+        let body = NSStackView()
+        body.orientation = .vertical
+        body.alignment = .width
+        body.spacing = 6
+
+        let box = NSButton(checkboxWithTitle: "Check for updates when UpdateAll opens",
+                           target: self, action: #selector(scanOnLaunchToggled(_:)))
+        box.state = Settings.scanOnLaunch ? .on : .off
+        body.addArrangedSubview(box)
+        body.addArrangedSubview(caption(
+            "Off means the table stays empty until you press Check for Updates."))
+
+        return card("General", body)
+    }
 
     private func managersCard() -> NSView {
         managerBoxes.removeAll()
@@ -370,6 +387,10 @@ final class SettingsViewController: NSViewController {
     }
 
     // MARK: actions ──────────────────────────────────────────────────────
+
+    @objc private func scanOnLaunchToggled(_ sender: NSButton) {
+        Settings.scanOnLaunch = sender.state == .on
+    }
 
     @objc private func managerToggled(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }

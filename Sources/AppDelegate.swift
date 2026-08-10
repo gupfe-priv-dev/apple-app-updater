@@ -29,7 +29,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Ask for App Management up front rather than at the first failed cask:
         // the permission only takes effect after a relaunch, so discovering it
         // mid-run would mean losing the run.
-        requireAppManagement { [weak self] in self?.main.updates.scan() }
+        requireAppManagement { [weak self] in
+            guard Settings.scanOnLaunch else { return }
+            self?.main.updates.scan()
+        }
         // background, throttled once-per-day GitHub release check
         checkSelfUpdateIfDue()
     }
