@@ -33,9 +33,8 @@ final class MainWindowController: NSObject, NSToolbarDelegate, NSWindowDelegate 
 
     init(tools: [Tool], appDelegate: AppDelegate) {
         updates = UpdatesViewController(tools: tools)
-        settings = SettingsViewController(tools: tools)
+        settings = SettingsViewController(tools: tools, appDelegate: appDelegate)
         updates.appDelegate = appDelegate
-        settings.appDelegate = appDelegate
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1020, height: 680),
@@ -162,13 +161,9 @@ final class MainWindowController: NSObject, NSToolbarDelegate, NSWindowDelegate 
             w.title = "Update All Settings"
             w.contentViewController = settings
             w.isReleasedWhenClosed = false      // we keep and reuse it
-            // Size AFTER installing the controller: assigning a
-            // contentViewController resizes the window to fit that view, and
-            // a scroll view with no intrinsic size collapses the window to
-            // almost nothing.
-            w.setContentSize(NSSize(width: 560, height: 620))
-            w.minSize = NSSize(width: 480, height: 400)
-            w.setFrameAutosaveName("UpdateAllSettingsWindow")
+            // The tab controller drives the size from each pane's
+            // preferredContentSize, the way a native preferences window does —
+            // so no frame autosave here, it would fight that.
             w.center()
             settingsWindow = w
         }

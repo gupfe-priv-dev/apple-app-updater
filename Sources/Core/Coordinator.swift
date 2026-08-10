@@ -46,6 +46,9 @@ final class Coordinator {
     /// Scan every enabled, available tool.
     func scan() {
         guard !isRunning, let host = host else { return }
+        // A scan is the point at which "what's installed" is re-established,
+        // so drop the cached availability answers first.
+        ToolAvailability.invalidate()
         begin(.scan)
         let tools = host.tools
         task = Task { @MainActor [weak self] in
@@ -53,7 +56,7 @@ final class Coordinator {
             for (i, tool) in tools.enumerated() {
                 if self.aborted { break }
                 if !Settings.isEnabled(tool.id) { host.toolSkipped(i, reason: "disabled"); continue }
-                if !tool.isAvailable() { host.toolSkipped(i, reason: "not installed"); continue }
+                if !ToolAvailability.check(tool) { host.toolSkipped(i, reason: "not installed"); continue }
                 host.toolDidBegin(i)
                 let r = await tool.scan(self.context())
                 host.toolDidEndScan(i, r)
@@ -78,7 +81,7 @@ final class Coordinator {
                 if self.aborted { break }
                 guard let items = selection[i], !items.isEmpty else { continue }
                 if !Settings.isEnabled(tool.id) { host.toolSkipped(i, reason: "disabled"); continue }
-                if !tool.isAvailable() { host.toolSkipped(i, reason: "not installed"); continue }
+                if !ToolAvailability.check(tool) { host.toolSkipped(i, reason: "not installed"); continue }
 
                 host.toolDidBegin(i)
                 let ctx = self.context()

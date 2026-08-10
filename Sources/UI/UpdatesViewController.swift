@@ -88,13 +88,38 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         ])
     }
 
+    /// Set once the saved console height has been applied. Until then the
+    /// split's resize callbacks are AppKit's own initial layout, not the user
+    /// dragging — saving those would overwrite the stored height with whatever
+    /// the first pass happened to produce (typically half the window).
+    private var didRestoreSplit = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(exclusionsChanged),
+            name: .excludedItemsChanged, object: nil)
+    }
+
+    /// Re-partition the scanned rows against the current hidden list, so
+    /// hiding and unhiding both take effect without waiting for a re-scan.
+    @objc private func exclusionsChanged() {
+        let all = rows + excludedRows
+        rows = all.filter { !Settings.isExcluded($0.toolID, $0.token) }
+        excludedRows = all.filter { Settings.isExcluded($0.toolID, $0.token) }
+        sortRows()
+        table.reloadData()
+        refreshCounts()
+    }
+
     override func viewDidAppear() {
         super.viewDidAppear()
-        // Restore the console height once the split has a real size.
+        guard !didRestoreSplit else { return }
         let total = split.bounds.height
-        if total > 200 {
-            split.setPosition(total - Settings.consoleHeight, ofDividerAt: 0)
-        }
+        guard total > 200 else { return }
+        let console = min(Settings.consoleHeight, total - 120)
+        split.setPosition(total - console, ofDividerAt: 0)
+        didRestoreSplit = true
     }
 
     private enum Column: String, CaseIterable {
@@ -316,12 +341,10 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
 
     @objc private func excludeRow() {
         guard let row = menuRow else { return }
+        // Settings.exclude posts .excludedItemsChanged, which re-partitions the
+        // rows — no need to move this one by hand.
         Settings.exclude(row.toolID, row.token)
-        rows.removeAll { $0 === row }
-        excludedRows.append(row)
-        table.reloadData()
-        refreshCounts()
-        setStatus("Hiding \(row.name). Undo in Settings → Hidden packages.")
+        setStatus("Hiding \(row.name). Undo in Settings → Hidden.")
     }
 
     @objc private func clearRowFlag() {
@@ -761,7 +784,8 @@ extension UpdatesViewController: NSSplitViewDelegate {
     }
 
     func splitViewDidResizeSubviews(_ notification: Notification) {
-        guard split.bounds.height > 0, console.bounds.height > 0 else { return }
+        // Only once the restore has happened — see didRestoreSplit.
+        guard didRestoreSplit, split.bounds.height > 0, console.bounds.height > 0 else { return }
         Settings.consoleHeight = console.bounds.height
     }
 }

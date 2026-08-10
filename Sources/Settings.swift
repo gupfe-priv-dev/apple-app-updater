@@ -47,12 +47,14 @@ enum Settings {
         var s = excludedItems
         s.insert(excludeKeyFor(toolID, token))
         excludedItems = s
+        NotificationCenter.default.post(name: .excludedItemsChanged, object: nil)
     }
 
     static func unexclude(_ entry: String) {
         var s = excludedItems
         s.remove(entry)
         excludedItems = s
+        NotificationCenter.default.post(name: .excludedItemsChanged, object: nil)
     }
 
     // MARK: behaviour ────────────────────────────────────────────────────
@@ -81,4 +83,11 @@ enum Settings {
         }
         set { defaults.set(Double(newValue), forKey: splitKey) }
     }
+}
+
+extension Notification.Name {
+    /// The hidden-package list changed. The updates table listens so that
+    /// unhiding something puts its row back immediately, rather than leaving
+    /// the user to guess that a re-scan is needed.
+    static let excludedItemsChanged = Notification.Name("UpdateAll.excludedItemsChanged")
 }
