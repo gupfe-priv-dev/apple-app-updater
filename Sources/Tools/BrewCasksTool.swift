@@ -64,26 +64,42 @@ struct BrewCasksTool: Tool {
         return manual
     }
 
+    var supportsTargetedInstall: Bool { true }
+
     func install(_ ctx: RunContext) async -> InstallOutcome {
+        await upgrade(ctx, only: nil)
+    }
+
+    func install(_ ctx: RunContext, only items: [UpdateItem]) async -> InstallOutcome {
+        await upgrade(ctx, only: Set(items.map { $0.token }))
+    }
+
+    /// `only` nil → every outdated cask; otherwise the intersection with it.
+    private func upgrade(_ ctx: RunContext, only: Set<String>?) async -> InstallOutcome {
         await restoreDriftedCasks(ctx)
         // Quit apps that are about to be replaced while open (updating a running
         // app can leave it glitchy until restart). Relaunched after the upgrade.
-        let relaunch = await quitRunningApps(ctx)
+        let relaunch = await quitRunningApps(ctx, only: only)
 
         // Which casks are actually outdated (greedy), minus manual-installer
         // casks brew won't auto-upgrade anyway.
         let outdated = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--quiet"])
         var tokens = outdated.output.split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if let only = only { tokens = tokens.filter { only.contains($0) } }
         let manual = await manualInstallerCasks(tokens, ctx)
         tokens = tokens.filter { !manual.contains($0) }
 
         // Disabled casks are never "outdated", so we won't try to upgrade them —
         // but still offer to remove the dead ones. A --dry-run surfaces the
-        // "disabled" warnings without downloading anything.
-        let dry = await ctx.capture(["/bin/sh", "-c",
-                                     "brew upgrade --cask --greedy --dry-run 2>&1"])
-        await handleDisabledCasks(in: dry.output, ctx)
+        // "disabled" warnings without downloading anything. Skipped on a
+        // targeted run: the user picked specific rows and shouldn't be asked
+        // about unrelated casks they didn't select.
+        if only == nil {
+            let dry = await ctx.capture(["/bin/sh", "-c",
+                                         "brew upgrade --cask --greedy --dry-run 2>&1"])
+            await handleDisabledCasks(in: dry.output, ctx)
+        }
 
         if tokens.isEmpty {
             ctx.line("✓ All casks up to date")
@@ -126,9 +142,11 @@ struct BrewCasksTool: Tool {
         // Only a hard failure if EVERY cask failed; a partial failure still
         // applied the others, so don't flag the whole section red.
         if failed.count == tokens.count {
-            return .failed("all \(tokens.count) cask upgrade(s) failed: \(failed.joined(separator: ", "))")
+            return InstallOutcome(.failed,
+                "all \(tokens.count) cask upgrade(s) failed: \(failed.joined(separator: ", "))",
+                failedItems: failed)
         }
-        return .ok
+        return .partial(failed)
     }
 
     // MARK: running apps ──────────────────────────────────────────────────
@@ -138,10 +156,11 @@ struct BrewCasksTool: Tool {
     /// from its bundle — can break the live instance until it's relaunched. So
     /// we offer to quit them cleanly first; the returned names are relaunched
     /// once the upgrade finishes.
-    private func quitRunningApps(_ ctx: RunContext) async -> [String] {
+    private func quitRunningApps(_ ctx: RunContext, only: Set<String>?) async -> [String] {
         let outdated = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--quiet"])
         var tokens = outdated.output.split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if let only = only { tokens = tokens.filter { only.contains($0) } }
         // manual-installer casks (e.g. battle-net) won't actually be upgraded,
         // so don't bother asking the user to quit them.
         let manual = await manualInstallerCasks(tokens, ctx)

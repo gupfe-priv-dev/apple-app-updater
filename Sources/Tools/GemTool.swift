@@ -33,10 +33,44 @@ struct GemTool: Tool {
         }
     }
 
+    /// `gem outdated` prints "name (current < latest)" — split it so the table
+    /// gets a bare gem name and a real version delta instead of one blob.
+    private func parse(_ line: String) -> UpdateItem {
+        let name = String(line.split(separator: " ").first ?? Substring(line))
+        guard let open = line.firstIndex(of: "("), line.hasSuffix(")") else {
+            return UpdateItem(name)
+        }
+        let inner = line[line.index(after: open)..<line.index(before: line.endIndex)]
+        let pair = inner.components(separatedBy: "<").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard pair.count == 2 else { return UpdateItem(name) }
+        return UpdateItem(name, current: pair[0], latest: pair[1])
+    }
+
     func scan(_ ctx: RunContext) async -> ScanResult {
         guard let gem = gemPath() else { return .unavailable }
         let r = await ctx.capture([gem, "outdated"])
-        return .from(clean(r.output).map { UpdateItem($0) })
+        return .from(clean(r.output).map(parse))
+    }
+
+    var supportsTargetedInstall: Bool { true }
+
+    func install(_ ctx: RunContext, only items: [UpdateItem]) async -> InstallOutcome {
+        guard let gem = gemPath() else { return .unavailable }
+        guard !items.isEmpty else { return .skipped("nothing selected") }
+        // --system is deliberately not run here: a targeted update shouldn't
+        // also bump RubyGems itself behind the user's back.
+        var failed: [String] = []
+        for item in items {
+            ctx.line("")
+            ctx.line("==> \(item.token)")
+            let status = await ctx.run([gem, "update", "--no-document", item.token])
+            if status != 0 { failed.append(item.token) }
+        }
+        if failed.count == items.count {
+            return InstallOutcome(.failed, "gem update failed for: \(failed.joined(separator: ", "))",
+                                  failedItems: failed)
+        }
+        return .partial(failed)
     }
 
     func install(_ ctx: RunContext) async -> InstallOutcome {

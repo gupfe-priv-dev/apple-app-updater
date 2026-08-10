@@ -38,14 +38,26 @@ struct BrewFormulaeTool: Tool {
         return .from(visible)
     }
 
+    var supportsTargetedInstall: Bool { true }
+
     func install(_ ctx: RunContext) async -> InstallOutcome {
+        await upgrade(ctx, names: [])
+    }
+
+    func install(_ ctx: RunContext, only items: [UpdateItem]) async -> InstallOutcome {
+        await upgrade(ctx, names: items.map { $0.token })
+    }
+
+    /// `names` empty → upgrade every outdated formula; otherwise just those.
+    private func upgrade(_ ctx: RunContext, names: [String]) async -> InstallOutcome {
         await BrewTapTrust.ensure(ctx)
         _ = await ctx.capture(["brew", "update"])
         // tee the upgrade output so we can detect post-upgrade link conflicts
         // (e.g. yt-dlp's /usr/local/bin/<name> already exists from another
         // package manager) and auto-repair them with `brew link --overwrite`.
         let log = NSTemporaryDirectory() + "ua-formulae-\(UUID().uuidString).log"
-        let cmd = "brew upgrade --formula 2>&1 | tee '\(log)'"
+        let targets = names.map { "'\($0)'" }.joined(separator: " ")
+        let cmd = "brew upgrade --formula \(targets) 2>&1 | tee '\(log)'"
         let status = await ctx.run(["/bin/sh", "-c", cmd],
                                    env: ["HOMEBREW_DOWNLOAD_CONCURRENCY": "1"])
         let logText = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
@@ -57,10 +69,16 @@ struct BrewFormulaeTool: Tool {
         // if nothing's outdated anymore, the upgrade did its job.
         if status == 0 { return .ok }
         let after = await ctx.capture(["brew", "outdated", "--formula", "--quiet"])
-        let stillOutdated: [String] = after.output
+        var stillOutdated: [String] = after.output
             .split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+        // On a targeted run, formulae we deliberately left alone are still
+        // outdated by design — they're not failures of this run.
+        if !names.isEmpty {
+            let asked = Set(names)
+            stillOutdated = stillOutdated.filter { asked.contains($0) }
+        }
         if stillOutdated.isEmpty { return .ok }
         // Drop Tier 3 / no-bottle formulae from the failure list — those
         // require `--build-from-source` and are not an upgrade failure.

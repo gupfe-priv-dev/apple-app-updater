@@ -58,12 +58,29 @@ protocol Tool {
     /// Check for available updates without installing anything.
     func scan(_ ctx: RunContext) async -> ScanResult
 
-    /// Apply available updates. May prompt via ctx.ask for destructive/ambiguous
-    /// steps. Streams progress via ctx.run / ctx.emit.
+    /// Apply every available update. May prompt via ctx.ask for
+    /// destructive/ambiguous steps. Streams progress via ctx.run / ctx.emit.
     func install(_ ctx: RunContext) async -> InstallOutcome
+
+    /// Whether `install(_:only:)` can genuinely restrict itself to a subset.
+    /// When false the UI checkboxes for this tool move as one group, because
+    /// unchecking a single row wouldn't actually spare it.
+    var supportsTargetedInstall: Bool { get }
+
+    /// Apply updates for `items` only. Tools that can't target a subset ignore
+    /// the argument (the default implementation below) — the coordinator only
+    /// passes a partial list to tools that advertise `supportsTargetedInstall`.
+    func install(_ ctx: RunContext, only items: [UpdateItem]) async -> InstallOutcome
 }
 
 extension Tool {
+    /// Most tools upgrade everything in one command; opt in per tool.
+    var supportsTargetedInstall: Bool { false }
+
+    func install(_ ctx: RunContext, only items: [UpdateItem]) async -> InstallOutcome {
+        await install(ctx)
+    }
+
     /// Default availability helper: is `cmd` on PATH?
     func commandExists(_ cmd: String) -> Bool {
         let p = Process()
