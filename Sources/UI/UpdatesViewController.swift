@@ -37,6 +37,18 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
     private let countLabel = NSTextField(labelWithString: "")
     private let spinner = NSProgressIndicator()
     private let emptyLabel = NSTextField(labelWithString: "")
+    /// Every control that acts on the table lives in one strip directly beneath
+    /// it, above the console — the long-standing macOS pattern of an action bar
+    /// attached to a list (the +/−/⚙︎ bars under the tables in System Settings),
+    /// and what the HIG means by controls that affect the window's contents.
+    /// The window has no toolbar as a result; an empty one would just look
+    /// broken.
+    private var checkButton: NSButton!
+    private var selectAllButton: NSButton!
+    private var deselectAllButton: NSButton!
+    private var updateButton: NSButton!
+    private var stopButton: NSButton!
+    private var actionBar: NSView!
 
     /// Elapsed-time heartbeat. Silent installers (a cask downloading, a
     /// `softwareupdate` that prints nothing for minutes) would otherwise look
@@ -61,11 +73,30 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         buildTable()
         buildStatusBar()
 
+        // The action bar travels with the table, so it goes inside the split's
+        // first pane rather than being a sibling — drag the divider and the
+        // buttons stay glued to the rows they act on.
+        actionBar = buildActionBar()
+        let tablePane = NSView()
+        tablePane.translatesAutoresizingMaskIntoConstraints = false
+        tablePane.addSubview(tableScroll)
+        tablePane.addSubview(actionBar)
+        NSLayoutConstraint.activate([
+            tableScroll.topAnchor.constraint(equalTo: tablePane.topAnchor),
+            tableScroll.leadingAnchor.constraint(equalTo: tablePane.leadingAnchor),
+            tableScroll.trailingAnchor.constraint(equalTo: tablePane.trailingAnchor),
+            tableScroll.bottomAnchor.constraint(equalTo: actionBar.topAnchor),
+            actionBar.leadingAnchor.constraint(equalTo: tablePane.leadingAnchor),
+            actionBar.trailingAnchor.constraint(equalTo: tablePane.trailingAnchor),
+            actionBar.bottomAnchor.constraint(equalTo: tablePane.bottomAnchor),
+            actionBar.heightAnchor.constraint(equalToConstant: 44),
+        ])
+
         split.translatesAutoresizingMaskIntoConstraints = false
         split.isVertical = false          // stacked: table on top, console below
         split.dividerStyle = .thin
         split.delegate = self
-        split.addArrangedSubview(tableScroll)
+        split.addArrangedSubview(tablePane)
         split.addArrangedSubview(console)
         // The table takes new space when the window grows; the console keeps
         // the height the user gave it.
@@ -84,7 +115,7 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             statusBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             statusBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             statusBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            statusBar.heightAnchor.constraint(equalToConstant: 28),
+            statusBar.heightAnchor.constraint(equalToConstant: 34),
         ])
     }
 
@@ -122,29 +153,29 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         didRestoreSplit = true
     }
 
+    /// Installed and Available used to be separate columns with a third,
+    /// title-less column holding the arrow between them. That drew its own
+    /// header dividers and read as a mistake. They're one Version column now —
+    /// "2.0.0 → 2.7.0" in a single cell, which is how the eye reads it anyway.
     private enum Column: String, CaseIterable {
-        case check, manager, package, current, arrow, available, status
+        case check, manager, package, version, status
 
         var title: String {
             switch self {
-            case .check:     return ""
-            case .manager:   return "Manager"
-            case .package:   return "Package"
-            case .current:   return "Installed"
-            case .arrow:     return ""
-            case .available: return "Available"
-            case .status:    return "Status"
+            case .check:   return ""
+            case .manager: return "Manager"
+            case .package: return "Package"
+            case .version: return "Version"
+            case .status:  return "Status"
             }
         }
         var width: CGFloat {
             switch self {
-            case .check:     return 22
-            case .manager:   return 150
-            case .package:   return 260
-            case .current:   return 120
-            case .arrow:     return 16
-            case .available: return 120
-            case .status:    return 220
+            case .check:   return 22
+            case .manager: return 150
+            case .package: return 240
+            case .version: return 200
+            case .status:  return 190
             }
         }
     }
@@ -166,10 +197,11 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             let c = NSTableColumn(identifier: .init(col.rawValue))
             c.title = col.title
             c.width = col.width
-            c.minWidth = col == .check ? 22 : 16
-            // Sorting by the visible text is what people expect from a table;
-            // the arrow column has nothing to sort by.
-            if col != .check && col != .arrow {
+            c.minWidth = col == .check ? 22 : 60
+            // Package absorbs any extra window width; the rest hold their size,
+            // so a wide window doesn't leave a dead gap mid-row.
+            c.resizingMask = col == .package ? .autoresizingMask : .userResizingMask
+            if col != .check {
                 c.sortDescriptorPrototype = NSSortDescriptor(key: col.rawValue, ascending: true)
             }
             table.addTableColumn(c)
@@ -207,6 +239,106 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         countLabel.font = .systemFont(ofSize: 11)
         countLabel.textColor = .secondaryLabelColor
         countLabel.alignment = .right
+
+    }
+
+    private func barButton(_ title: String, _ symbol: String?, _ action: Selector) -> NSButton {
+        let b = NSButton(title: title, target: self, action: action)
+        b.bezelStyle = .rounded
+        b.controlSize = .regular
+        b.font = .systemFont(ofSize: 12)
+        if let symbol = symbol {
+            b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            b.imagePosition = .imageLeading
+        }
+        b.setContentHuggingPriority(.required, for: .horizontal)
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }
+
+    private func buildActionBar() -> NSView {
+        checkButton       = barButton("Check for Updates", "arrow.clockwise", #selector(checkAction))
+        selectAllButton   = barButton("Select All", nil, #selector(selectAllAction))
+        deselectAllButton = barButton("Deselect All", nil, #selector(deselectAllAction))
+        updateButton      = barButton("Update Selected", "arrow.down.circle.fill", #selector(updateAction))
+        stopButton        = barButton("Stop", "stop.circle.fill", #selector(stopAction))
+        stopButton.contentTintColor = .systemRed
+        stopButton.isHidden = true        // only while a run is going
+
+        let bar = NSView()
+        bar.translatesAutoresizingMaskIntoConstraints = false
+
+        // Hairline above, so the strip reads as attached to the table.
+        let rule = NSBox()
+        rule.boxType = .separator
+        rule.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [checkButton, selectAllButton, deselectAllButton,
+                                        NSView(), stopButton, updateButton])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.setCustomSpacing(16, after: checkButton)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        bar.addSubview(rule)
+        bar.addSubview(stack)
+        NSLayoutConstraint.activate([
+            rule.topAnchor.constraint(equalTo: bar.topAnchor),
+            rule.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            rule.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            stack.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
+            stack.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+        ])
+        return bar
+    }
+
+    /// Paint the primary action: accent fill with white text when it can be
+    /// pressed, plain when it can't. It's the only colour in the window's
+    /// chrome, which is what makes it read as *the* action.
+    private func styleUpdateButton(title: String, enabled: Bool) {
+        updateButton.isEnabled = enabled
+        updateButton.bezelColor = enabled ? .controlAccentColor : nil
+        updateButton.contentTintColor = enabled ? .white : .disabledControlTextColor
+        updateButton.attributedTitle = NSAttributedString(string: title, attributes: [
+            .foregroundColor: enabled ? NSColor.white : NSColor.disabledControlTextColor,
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+        ])
+    }
+
+    @objc private func checkAction() { scan() }
+    @objc private func selectAllAction() { selectAll() }
+    @objc private func deselectAllAction() { deselectAll() }
+    @objc private func updateAction() { updateSelected() }
+
+    @objc private func stopAction() {
+        if stopArmed {
+            forceKill()
+            stopButton.isEnabled = false
+        } else {
+            abort()
+            stopArmed = true
+            stopButton.title = "Force Quit"
+        }
+    }
+    private var stopArmed = false
+
+    /// One place decides what's clickable, so a half-updated bar can't happen.
+    private func refreshActionBar() {
+        let busy = isBusy
+        let selected = selectedCount
+        checkButton.isEnabled = !busy
+        selectAllButton.isEnabled = !busy && selected < rows.count
+        deselectAllButton.isEnabled = !busy && selected > 0
+        styleUpdateButton(title: selected > 0 ? "Update Selected (\(selected))" : "Update Selected",
+                          enabled: !busy && selected > 0)
+        stopButton.isHidden = !busy
+        if !busy {
+            stopArmed = false
+            stopButton.title = "Stop"
+            stopButton.isEnabled = true
+        }
     }
 
     private func buildStatusBarView() -> NSView {
@@ -271,25 +403,18 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         confirmAndInstall(selection, count: chosen.count)
     }
 
+    /// No "are you sure?" here. The user has already said what they want twice —
+    /// by checking rows and by pressing a button that names the count — and
+    /// updating is neither destructive nor irreversible. Apple's guidance is to
+    /// avoid alerts for common actions even when they *are* destructive, so a
+    /// third confirmation would be pure friction. The genuinely consequential
+    /// steps inside a run (quitting an app, removing a disabled cask) still ask.
     private func confirmAndInstall(_ selection: [Int: [UpdateItem]], count: Int) {
-        let alert = NSAlert()
-        alert.messageText = "Update \(count) package\(count == 1 ? "" : "s")?"
-        alert.informativeText = summarize(selection)
-        alert.addButton(withTitle: "Update")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
         // Cask installs write to /Applications, which macOS gates behind App
         // Management — check before we start rather than failing halfway.
         appDelegate?.requireAppManagement { [weak self] in
             self?.coordinator.install(selection: selection)
         }
-    }
-
-    private func summarize(_ selection: [Int: [UpdateItem]]) -> String {
-        selection.keys.sorted().map { i in
-            "\(toolList[i].title): \(selection[i]!.count)"
-        }.joined(separator: "\n")
     }
 
     func selectAll() { setAllSelected(true) }
@@ -548,6 +673,7 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             stopHeartbeat()
         }
         emptyLabel.isHidden = !rows.isEmpty || busy
+        refreshActionBar()
         NotificationCenter.default.post(name: .updatesStateChanged, object: nil)
     }
 
@@ -557,6 +683,7 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         let sel = selectedCount
         countLabel.stringValue = rows.isEmpty ? ""
             : "\(sel) of \(rows.count) selected"
+        refreshActionBar()
         NotificationCenter.default.post(name: .updatesStateChanged, object: nil)
     }
 
@@ -610,19 +737,39 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             return ascending ? r == .orderedAscending : r == .orderedDescending
         }
         switch col {
-        case .manager:   rows.sort { $0.toolIndex == $1.toolIndex
-                                        ? cmp($0.name, $1.name)
-                                        : (ascending ? $0.toolIndex < $1.toolIndex
-                                                     : $0.toolIndex > $1.toolIndex) }
-        case .package:   rows.sort { cmp($0.name, $1.name) }
-        case .current:   rows.sort { cmp($0.current, $1.current) }
-        case .available: rows.sort { cmp($0.available, $1.available) }
-        case .status:    rows.sort { cmp($0.status, $1.status) }
-        case .check:     rows.sort { $0.isSelected == $1.isSelected
-                                        ? cmp($0.name, $1.name)
-                                        : (ascending ? !$0.isSelected : $0.isSelected) }
-        case .arrow:     break
+        case .manager: rows.sort { $0.toolIndex == $1.toolIndex
+                                      ? cmp($0.name, $1.name)
+                                      : (ascending ? $0.toolIndex < $1.toolIndex
+                                                   : $0.toolIndex > $1.toolIndex) }
+        case .package: rows.sort { cmp($0.name, $1.name) }
+        case .version: rows.sort { cmp($0.current, $1.current) }
+        case .status:  rows.sort { cmp($0.status, $1.status) }
+        case .check:   rows.sort { $0.isSelected == $1.isSelected
+                                      ? cmp($0.name, $1.name)
+                                      : (ascending ? !$0.isSelected : $0.isSelected) }
         }
+    }
+
+    /// "2.0.0 → 2.7.0" as one run of text: the old version muted, the arrow
+    /// fainter still, the new version green — so the eye lands on what you're
+    /// moving to. Monospaced digits keep the numbers from jittering row to row.
+    private func versionText(_ row: UpdateRow) -> NSAttributedString {
+        let mono = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        let monoBold = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        let s = NSMutableAttributedString()
+        // Nothing to show for a row that has no version information at all
+        // (an opaque manager, or a package the CLI doesn't version).
+        guard row.current != "—" || row.available != "—" else {
+            return NSAttributedString(string: "—", attributes: [
+                .foregroundColor: NSColor.tertiaryLabelColor, .font: mono])
+        }
+        s.append(NSAttributedString(string: row.current, attributes: [
+            .foregroundColor: NSColor.secondaryLabelColor, .font: mono]))
+        s.append(NSAttributedString(string: "  →  ", attributes: [
+            .foregroundColor: NSColor.tertiaryLabelColor, .font: mono]))
+        s.append(NSAttributedString(string: row.available, attributes: [
+            .foregroundColor: NSColor.systemGreen, .font: monoBold]))
+        return s
     }
 
     // MARK: checkbox ─────────────────────────────────────────────────────
@@ -703,18 +850,9 @@ extension UpdatesViewController: NSTableViewDataSource, NSTableViewDelegate {
             // The token is what the CLI takes; surface it when it isn't the
             // name (App Store numeric ids) rather than making the user guess.
             cell.toolTip = item.token == item.name ? item.name : "\(item.name)  (\(item.token))"
-        case .current:
-            cell.stringValue = item.current
-            cell.textColor = .secondaryLabelColor
-            cell.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        case .arrow:
-            cell.stringValue = item.current == "—" && item.available == "—" ? "" : "→"
-            cell.textColor = .tertiaryLabelColor
-            cell.alignment = .center
-        case .available:
-            cell.stringValue = item.available
-            cell.textColor = .systemGreen
-            cell.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        case .version:
+            cell.attributedStringValue = versionText(item)
+            cell.toolTip = item.current == "—" ? nil : "\(item.current) → \(item.available)"
         case .status:
             cell.stringValue = item.status
             cell.textColor = item.statusColor
