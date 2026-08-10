@@ -162,7 +162,12 @@ final class MainWindowController: NSObject, NSToolbarDelegate, NSWindowDelegate 
             w.title = "Update All Settings"
             w.contentViewController = settings
             w.isReleasedWhenClosed = false      // we keep and reuse it
-            w.minSize = NSSize(width: 480, height: 360)
+            // Size AFTER installing the controller: assigning a
+            // contentViewController resizes the window to fit that view, and
+            // a scroll view with no intrinsic size collapses the window to
+            // almost nothing.
+            w.setContentSize(NSSize(width: 560, height: 620))
+            w.minSize = NSSize(width: 480, height: 400)
             w.setFrameAutosaveName("UpdateAllSettingsWindow")
             w.center()
             settingsWindow = w

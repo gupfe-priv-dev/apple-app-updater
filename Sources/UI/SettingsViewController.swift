@@ -9,14 +9,18 @@ final class SettingsViewController: NSViewController {
     let toolList: [Tool]
     weak var appDelegate: AppDelegate?
 
-    /// Flipped so the scroll view's origin is top-left. An unflipped document
-    /// view opens scrolled to the *bottom* of the stack, which reads as an
-    /// empty pane when the content is taller than the window.
-    private final class FlippedStack: NSStackView {
+    /// Flipped so the scroll view's origin is top-left — an unflipped document
+    /// view opens scrolled to the *bottom*, which reads as an empty pane.
+    ///
+    /// It has to be a plain container wrapping the stack, NOT an NSStackView
+    /// with `isFlipped` overridden: NSStackView lays its arranged views out
+    /// against its own coordinate assumptions, and flipping it collapses every
+    /// card onto the same origin.
+    private final class FlippedView: NSView {
         override var isFlipped: Bool { true }
     }
 
-    private let content = FlippedStack()
+    private let content = NSStackView()
     private var managerBoxes: [(id: String, box: NSButton)] = []
     private var hiddenList: NSStackView!
 
@@ -33,14 +37,26 @@ final class SettingsViewController: NSViewController {
         content.edgeInsets = NSEdgeInsets(top: 20, left: 22, bottom: 20, right: 22)
         content.translatesAutoresizingMaskIntoConstraints = false
 
+        // content (the stack) lives inside a flipped container, which is what
+        // the scroll view scrolls. The container's height is driven by the
+        // stack, so the scroll range is correct as cards are added or removed.
+        let container = FlippedView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(content)
+
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
-        scroll.documentView = content
+        scroll.documentView = container
+
         NSLayoutConstraint.activate([
-            content.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            content.topAnchor.constraint(equalTo: container.topAnchor),
+            content.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            container.widthAnchor.constraint(equalTo: scroll.widthAnchor),
         ])
         view = scroll
     }
@@ -311,17 +327,46 @@ final class SettingsViewController: NSViewController {
         return f
     }
 
-    /// A titled group box — the macOS equivalent of CliSync's settings cards.
-    /// Width is pinned by the caller, once the box is in the hierarchy.
+    /// A settings card: a small-caps header above a rounded, bordered panel —
+    /// the grouped look System Settings uses.
+    ///
+    /// The body is pinned *inside* NSBox's own contentView rather than
+    /// replacing it: assigning `box.contentView = body` leaves the body with
+    /// no constraints, and a body with translatesAutoresizingMaskIntoConstraints
+    /// off then collapses the whole card to a few points tall.
+    /// Width is pinned by the caller, once the card is in the hierarchy.
     private func card(_ title: String, _ body: NSView) -> NSView {
+        let header = NSTextField(labelWithString: title.uppercased())
+        header.font = .systemFont(ofSize: 11, weight: .semibold)
+        header.textColor = .secondaryLabelColor
+
         let box = NSBox()
-        box.title = title
-        box.titlePosition = .atTop
-        box.boxType = .primary
+        box.boxType = .custom
+        box.titlePosition = .noTitle
+        // Semantic colours so the card follows light/dark automatically.
+        box.fillColor = .controlBackgroundColor
+        box.borderColor = .separatorColor
+        box.borderWidth = 1
+        box.cornerRadius = 8
         box.translatesAutoresizingMaskIntoConstraints = false
+
         body.translatesAutoresizingMaskIntoConstraints = false
-        box.contentView = body
-        return box
+        let inner = box.contentView!
+        inner.addSubview(body)
+        NSLayoutConstraint.activate([
+            body.topAnchor.constraint(equalTo: inner.topAnchor, constant: 12),
+            body.leadingAnchor.constraint(equalTo: inner.leadingAnchor, constant: 14),
+            body.trailingAnchor.constraint(equalTo: inner.trailingAnchor, constant: -14),
+            body.bottomAnchor.constraint(equalTo: inner.bottomAnchor, constant: -12),
+        ])
+
+        let stack = NSStackView(views: [header, box])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        box.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        return stack
     }
 
     // MARK: actions ──────────────────────────────────────────────────────
