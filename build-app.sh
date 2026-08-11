@@ -28,7 +28,21 @@ COMMIT_COUNT=$(cd "$DIR" 2>/dev/null && git rev-list --count HEAD 2>/dev/null ||
 TAG=$(cd "$DIR" 2>/dev/null && git describe --tags --abbrev=0 2>/dev/null || echo "v0.0")
 TAG_VERSION="${TAG#v}"
 BUILD_TIME=$(date '+%Y-%m-%d %H:%M')
-SHORT_VERSION="$TAG_VERSION ($COMMIT, $BUILD_TIME)"
+# Only a build sitting exactly ON a release tag may claim that version. The
+# release workflow tags HEAD before it builds, so CI produces the clean string;
+# a local build is by definition ahead of the last release and says so. Without
+# this, a local build stamps the released version number and an installed copy
+# is indistinguishable from the published one.
+#
+# "1.4.0+2-preview" parses as 1.4.0 for the self-update check (the segment after
+# the last dot is read up to its '-', and a non-numeric core falls back to 0),
+# so a preview build still gets offered the next real release.
+AHEAD=$(cd "$DIR" 2>/dev/null && git rev-list --count "$TAG"..HEAD 2>/dev/null || echo "0")
+if (cd "$DIR" 2>/dev/null && git describe --exact-match --tags HEAD >/dev/null 2>&1); then
+    SHORT_VERSION="$TAG_VERSION ($COMMIT, $BUILD_TIME)"
+else
+    SHORT_VERSION="$TAG_VERSION+${AHEAD}-preview ($COMMIT, $BUILD_TIME)"
+fi
 BUILD_VERSION="$COMMIT_COUNT"
 echo "  version: $SHORT_VERSION   (build $BUILD_VERSION)"
 
