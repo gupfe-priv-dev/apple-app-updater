@@ -20,8 +20,13 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         settings = SettingsViewController(tools: tools, appDelegate: appDelegate)
         updates.appDelegate = appDelegate
 
+        // First-run size. Sized to the content rather than the screen: wide
+        // enough for the columns without a dead gap, and short enough that a
+        // handful of rows doesn't sit in a mostly-empty table. After that
+        // setFrameAutosaveName takes over and the window reopens wherever and
+        // however big it was left.
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1020, height: 680),
+            contentRect: NSRect(x: 0, y: 0, width: 880, height: 492),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false)
         super.init()
@@ -29,8 +34,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         window.title = "Update All"
         window.titlebarAppearsTransparent = false
         window.contentViewController = updates
-        window.setContentSize(NSSize(width: 1020, height: 680))
-        window.minSize = NSSize(width: 820, height: 480)
+        window.setContentSize(NSSize(width: 880, height: 492))
+        window.minSize = NSSize(width: 760, height: 420)
         window.delegate = self
         window.center()
         window.setFrameAutosaveName("UpdateAllMainWindow")

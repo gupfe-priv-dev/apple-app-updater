@@ -668,6 +668,10 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             let done = rows.filter { $0.didSucceed }.count
             rows.removeAll { $0.didSucceed }
             let stillPending = rows.count
+            // Reload *after* the removal — the reload above ran before it, so
+            // without this the table keeps showing the rows that just left.
+            table.reloadData()
+            refreshCounts()
             switch (done, stillPending) {
             case (0, _):
                 setStatus("Nothing was updated.")

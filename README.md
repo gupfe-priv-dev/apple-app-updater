@@ -26,6 +26,13 @@ single console:
 - **Settings** is a standard preferences window at ⌘, — managers, system
   access, hidden packages, maintenance.
 
+Updating writes to the same console, in order, and an app that's running when
+its cask is replaced is offered a clean quit and relaunch first — replacing a
+live app bundle otherwise leaves it glitchy until it's restarted. Rows that
+finish leave the table; what's still pending stays:
+
+![Updating a single package](docs/screenshot-run.png)
+
 Turn a manager off and it's skipped entirely: not scanned, not updated. One
 that isn't installed says so rather than disappearing, so the list always
 reflects everything the app knows how to update:
