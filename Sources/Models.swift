@@ -3,15 +3,22 @@ import Foundation
 /// One available update surfaced by a tool's scan.
 struct UpdateItem {
     var name: String       // display name, e.g. "google-chrome"
+    /// Identifier the manager's CLI actually takes on the command line — a cask
+    /// token, an npm package name, an App Store numeric id. Usually identical to
+    /// `name`; differs where the display name isn't addressable (mas).
+    var token: String
     var current: String?   // installed version, if known
     var latest: String?    // available version, if known
-    var detail: String?    // freeform extra (cask token, app path, …)
+    var detail: String?    // freeform extra (app path, note, …)
 
-    init(_ name: String, current: String? = nil, latest: String? = nil, detail: String? = nil) {
-        self.name = name; self.current = current; self.latest = latest; self.detail = detail
+    init(_ name: String, token: String? = nil, current: String? = nil,
+         latest: String? = nil, detail: String? = nil) {
+        self.name = name
+        self.token = token ?? name
+        self.current = current; self.latest = latest; self.detail = detail
     }
 
-    /// One-line summary for the dashboard / sidebar item list.
+    /// One-line summary for compact contexts (menus, logs).
     var summary: String {
         switch (current, latest) {
         case let (c?, l?) where c != l: return "\(name)  \(c) → \(l)"
@@ -53,11 +60,21 @@ struct InstallOutcome {
     enum State { case ok, skipped, failed, unavailable }
     var state: State
     var message: String?
+    /// Tokens that failed individually while the run as a whole still counts as
+    /// ok (brew casks upgrade one token per command, so a single bad download
+    /// shouldn't fail the section). Feeds the per-row failure memory.
+    var failedItems: [String]
 
-    init(_ state: State, _ message: String? = nil) { self.state = state; self.message = message }
+    init(_ state: State, _ message: String? = nil, failedItems: [String] = []) {
+        self.state = state; self.message = message; self.failedItems = failedItems
+    }
 
     static let ok          = InstallOutcome(.ok)
     static let unavailable = InstallOutcome(.unavailable)
     static func skipped(_ m: String? = nil) -> InstallOutcome { InstallOutcome(.skipped, m) }
     static func failed(_ m: String? = nil)  -> InstallOutcome { InstallOutcome(.failed, m) }
+    /// Section succeeded overall, but these tokens didn't.
+    static func partial(_ failed: [String]) -> InstallOutcome {
+        InstallOutcome(.ok, nil, failedItems: failed)
+    }
 }
