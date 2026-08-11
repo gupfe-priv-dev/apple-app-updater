@@ -19,6 +19,10 @@ final class UpdateRow {
     /// Warning shown in the Status column — a remembered failure, or the
     /// result of the run that just happened.
     var status: String = ""
+    /// The manager couldn't be checked (its CLI or registry didn't answer).
+    /// Such a row is real — you can still force it — but it isn't *known* work,
+    /// so it never arrives ticked and never counts toward "N updates available".
+    var isUnknown = false
     /// True only for a remembered failure. Tracked separately from `status`
     /// because plenty of rows carry a status that isn't a failure (an opaque
     /// manager's "unknown until run", a finished row's "✓ updated").

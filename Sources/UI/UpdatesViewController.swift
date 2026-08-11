@@ -571,7 +571,9 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
                                 managerLabel: tool.title,
                                 item: UpdateItem("(whole manager)", token: tool.id),
                                 targetable: false)
-            row.status = result.note ?? "unknown until run"
+            row.status = "⚠ " + (result.note ?? "couldn't check")
+            row.isUnknown = true
+            row.isSelected = false      // not known work — never ticked by default
             rows.append(row)
             console.writeNote("   ? \(result.note ?? "can't determine — will report when run")")
         case .unavailable:
@@ -650,15 +652,24 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             setStatus("Stopped.")
             emptyLabel.stringValue = "Stopped before finding anything."
         } else if mode == .scan {
-            let n = rows.count
+            // A manager that couldn't be checked isn't an available update, and
+            // counting it as one is how "everything is current" ends up
+            // reported as "1 update available".
+            let n = rows.filter { !$0.isUnknown }.count
+            let unknown = rows.filter { $0.isUnknown }.count
             let flagged = rows.filter { $0.flaggedFailure }.count
+            var text: String
             if n == 0 {
-                setStatus("Everything is up to date.")
+                text = "Everything is up to date."
             } else if flagged > 0 {
-                setStatus("\(n) available — \(flagged) flagged from a previous failure, left unchecked.")
+                text = "\(n) available — \(flagged) flagged from a previous failure, left unchecked."
             } else {
-                setStatus("\(n) update\(n == 1 ? "" : "s") available.")
+                text = "\(n) update\(n == 1 ? "" : "s") available."
             }
+            if unknown > 0 {
+                text += "  \(unknown) manager\(unknown == 1 ? "" : "s") couldn't be checked."
+            }
+            setStatus(text)
             emptyLabel.stringValue = "Everything is up to date."
         } else {
             // Rows that updated are no longer pending work, so they leave the

@@ -409,29 +409,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
         }
-        performSelfUpdateCheck(notify: false)
+        performSelfUpdateCheck()
     }
 
-    @objc func checkForAppUpdate() { performSelfUpdateCheck(notify: true) }
+    /// Force a check and hand the outcome back so the caller can redraw itself.
+    func checkForAppUpdate(completion: ((_ problem: String?) -> Void)? = nil) {
+        performSelfUpdateCheck(completion: completion)
+    }
 
     /// Tag of a newer release, if the check found one. Drives the Settings row.
     var updateAvailableTag: String? { selfUpdateAvailable?.tag }
 
+    @objc func installLatestRelease() { installLatestRelease(confirmFirst: true) }
+
     /// Hand the update to a script running outside the app, then quit so it can
-    /// replace the bundle. Confirmed first: this closes the app.
-    @objc func installLatestRelease() {
+    /// replace the bundle.
+    ///
+    /// `confirmFirst` is false when the caller already asked — the "Update
+    /// available" alert offers "Update and Restart" itself, and following that
+    /// with a second "are you sure" was one dialog too many for one decision.
+    func installLatestRelease(confirmFirst: Bool) {
         guard let release = selfUpdateRelease else {
             // We know a version is available but not its asset (state restored
             // from cache); re-fetch so we have something to download.
-            performSelfUpdateCheck(notify: false, thenInstall: true)
+            performSelfUpdateCheck(thenInstall: true)
             return
         }
-        let alert = NSAlert()
-        alert.messageText = "Update to \(release.tag_name)?"
-        alert.informativeText = "UpdateAll will quit, update itself, and reopen."
-        alert.addButton(withTitle: "Update and Restart")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if confirmFirst {
+            let alert = NSAlert()
+            alert.messageText = "Update to \(release.tag_name)?"
+            alert.informativeText = "UpdateAll will quit, update itself, and reopen."
+            alert.addButton(withTitle: "Update and Restart")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
 
         if let problem = SelfUpdateChecker.launchUpdater(for: release,
                                                          appPath: Bundle.main.bundlePath) {
@@ -461,7 +472,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window?.subtitle = "Update available: \(avail.tag)"
     }
 
-    private func performSelfUpdateCheck(notify: Bool, thenInstall: Bool = false) {
+    /// Check, update state, and hand back. Deliberately silent: the result
+    /// belongs in the Settings row that asked for it — current version on one
+    /// line, what's available on the next — not in an alert that has to be
+    /// dismissed before you can act on it. The only dialog left in this flow is
+    /// the one confirming an update that's about to close the app.
+    ///
+    /// `problem` is non-nil only when the check itself failed, so the caller can
+    /// say so in place.
+    private func performSelfUpdateCheck(thenInstall: Bool = false,
+                                        completion: ((_ problem: String?) -> Void)? = nil) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let result = SelfUpdateChecker.fetchLatest()
             DispatchQueue.main.async {
@@ -476,44 +496,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.announceSelfUpdate()
                     // Re-fetched purely to get the asset URL — carry on into the
                     // install the user already asked for.
-                    if thenInstall {
-                        if isNew { self.installLatestRelease() }
-                        else { self.showAlert(title: "Up to date",
-                                              message: "You're on \(current), the latest release.") }
+                    if thenInstall, isNew {
+                        self.installLatestRelease(confirmFirst: true)
                         return
                     }
-                    if notify {
-                        let alert = NSAlert()
-                        if isNew {
-                            alert.messageText = "Update available: \(rel.tag_name)"
-                            alert.informativeText = "You're on \(current). "
-                                + "UpdateAll will quit, update itself, and reopen."
-                            alert.addButton(withTitle: "Update and Restart")
-                            alert.addButton(withTitle: "Open release page")
-                            alert.addButton(withTitle: "Later")
-                            switch alert.runModal() {
-                            case .alertFirstButtonReturn:
-                                self.installLatestRelease()
-                            case .alertSecondButtonReturn:
-                                if let url = URL(string: rel.html_url) { NSWorkspace.shared.open(url) }
-                            default: break
-                            }
-                        } else {
-                            alert.messageText = "Up to date"
-                            alert.informativeText = "You're on \(current), the latest release."
-                            alert.addButton(withTitle: "OK")
-                            alert.runModal()
-                        }
-                    }
+                    completion?(nil)
                 case .failure(let err):
-                    if notify {
-                        let alert = NSAlert()
-                        alert.messageText = "Couldn't check for app updates"
-                        alert.informativeText = err.message
-                        alert.alertStyle = .warning
-                        alert.addButton(withTitle: "OK")
-                        alert.runModal()
-                    }
+                    completion?(err.message)
                 }
             }
         }

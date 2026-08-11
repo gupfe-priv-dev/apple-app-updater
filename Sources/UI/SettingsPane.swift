@@ -471,7 +471,7 @@ final class SettingsPane: NSViewController {
     }
 
     @objc private func checkAppUpdate() {
-        appDelegate?.checkForAppUpdate()
+        appDelegate?.checkForAppUpdate { [weak self] _ in self?.rebuild() }
     }
 
     @objc private func installAppUpdate() {
