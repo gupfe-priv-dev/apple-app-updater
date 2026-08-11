@@ -390,6 +390,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Cached "newer release available" info. nil = up to date or unknown.
     private var selfUpdateAvailable: (tag: String, url: String)?
+    /// The full release from the last live check, kept for its asset URL.
+    /// Cached state (restored on launch) knows the tag but not the download, so
+    /// this is nil until a check actually runs.
+    private var selfUpdateRelease: SelfUpdateChecker.LatestRelease?
 
     /// Throttled launch-time check; uses cached state when <24h old.
     private func checkSelfUpdateIfDue() {
@@ -410,6 +414,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func checkForAppUpdate() { performSelfUpdateCheck(notify: true) }
 
+    /// Tag of a newer release, if the check found one. Drives the Settings row.
+    var updateAvailableTag: String? { selfUpdateAvailable?.tag }
+
+    /// Hand the update to a script running outside the app, then quit so it can
+    /// replace the bundle. Confirmed first: this closes the app.
+    @objc func installLatestRelease() {
+        guard let release = selfUpdateRelease else {
+            // We know a version is available but not its asset (state restored
+            // from cache); re-fetch so we have something to download.
+            performSelfUpdateCheck(notify: false, thenInstall: true)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Update to \(release.tag_name)?"
+        alert.informativeText = "UpdateAll will quit and the update will run in Terminal, "
+            + "then reopen. You'll see exactly what it does."
+        alert.addButton(withTitle: "Update and Restart")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        if let problem = SelfUpdateChecker.launchUpdater(for: release,
+                                                         appPath: Bundle.main.bundlePath) {
+            showAlert(title: "Couldn't start the update", message: problem)
+            return
+        }
+        // The script waits for this process to disappear before touching the
+        // bundle, so quitting is the handover.
+        NSApp.terminate(nil)
+    }
+
     @objc func openLatestRelease() {
         if let urlStr = selfUpdateAvailable?.url, let url = URL(string: urlStr) {
             NSWorkspace.shared.open(url)
@@ -428,7 +462,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window?.subtitle = "Update available: \(avail.tag)"
     }
 
-    private func performSelfUpdateCheck(notify: Bool) {
+    private func performSelfUpdateCheck(notify: Bool, thenInstall: Bool = false) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let result = SelfUpdateChecker.fetchLatest()
             DispatchQueue.main.async {
@@ -439,17 +473,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let isNew = SelfUpdateChecker.isNewer(remote: rel.tag_name, current: current)
                     SelfUpdateChecker.saveState(latestTag: rel.tag_name, htmlUrl: rel.html_url)
                     self.selfUpdateAvailable = isNew ? (rel.tag_name, rel.html_url) : nil
+                    self.selfUpdateRelease = isNew ? rel : nil
                     self.announceSelfUpdate()
+                    // Re-fetched purely to get the asset URL — carry on into the
+                    // install the user already asked for.
+                    if thenInstall {
+                        if isNew { self.installLatestRelease() }
+                        else { self.showAlert(title: "Up to date",
+                                              message: "You're on \(current), the latest release.") }
+                        return
+                    }
                     if notify {
                         let alert = NSAlert()
                         if isNew {
                             alert.messageText = "Update available: \(rel.tag_name)"
-                            alert.informativeText = "You're on \(current). Open the release page to download?"
+                            alert.informativeText = "You're on \(current). Install it now? "
+                                + "UpdateAll will quit, update in Terminal, and reopen."
+                            alert.addButton(withTitle: "Update and Restart")
                             alert.addButton(withTitle: "Open release page")
                             alert.addButton(withTitle: "Later")
-                            if alert.runModal() == .alertFirstButtonReturn,
-                               let url = URL(string: rel.html_url) {
-                                NSWorkspace.shared.open(url)
+                            switch alert.runModal() {
+                            case .alertFirstButtonReturn:
+                                self.installLatestRelease()
+                            case .alertSecondButtonReturn:
+                                if let url = URL(string: rel.html_url) { NSWorkspace.shared.open(url) }
+                            default: break
                             }
                         } else {
                             alert.messageText = "Up to date"

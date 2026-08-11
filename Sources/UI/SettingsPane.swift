@@ -316,11 +316,23 @@ final class SettingsPane: NSViewController {
                            button: "Open", action: #selector(openLog)),
                 note("~/Library/Logs/update-all.log"),
             ]),
-            row("UpdateAll Itself:", [
-                statusLine(.neutral, appDelegate?.versionSummary ?? "",
-                           button: "Check for Updates", action: #selector(checkAppUpdate)),
-            ]),
+            row("UpdateAll Itself:", updateSelfControls()),
         ])
+    }
+
+    /// When a newer release is known, the row offers to install it outright
+    /// instead of only reporting the version.
+    private func updateSelfControls() -> [NSView] {
+        let version = appDelegate?.versionSummary ?? ""
+        guard let tag = appDelegate?.updateAvailableTag else {
+            return [statusLine(.neutral, version,
+                               button: "Check for Updates", action: #selector(checkAppUpdate))]
+        }
+        return [
+            statusLine(.stale, "\(version) — \(tag) available",
+                       button: "Update and Restart", action: #selector(installAppUpdate)),
+            note("Quits UpdateAll, runs the update in Terminal, and reopens it"),
+        ]
     }
 
     // MARK: building blocks ──────────────────────────────────────────────
@@ -458,5 +470,9 @@ final class SettingsPane: NSViewController {
 
     @objc private func checkAppUpdate() {
         appDelegate?.checkForAppUpdate()
+    }
+
+    @objc private func installAppUpdate() {
+        appDelegate?.installLatestRelease()
     }
 }

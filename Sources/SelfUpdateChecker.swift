@@ -13,11 +13,21 @@ enum SelfUpdateChecker {
     static let repoOwner = "gupfe-priv-dev"
     static let repoName  = "apple-app-updater"
 
+    struct Asset: Decodable {
+        let name: String
+        let browser_download_url: String
+    }
+
     struct LatestRelease: Decodable {
         let tag_name: String
         let html_url: String
         let name: String?
         let published_at: String?
+        /// The built .app, zipped by the release workflow. Absent on a release
+        /// published without artifacts, in which case we can only link.
+        let assets: [Asset]
+
+        var appZip: Asset? { assets.first { $0.name.hasSuffix(".zip") } }
     }
 
     private struct CachedState: Codable {
@@ -123,5 +133,89 @@ enum SelfUpdateChecker {
     /// "Open release page".
     static var releasesURL: URL {
         URL(string: "https://github.com/\(repoOwner)/\(repoName)/releases/latest")!
+    }
+
+    // MARK: Install
+
+    /// Write the updater script and hand it to Terminal, then the caller quits.
+    ///
+    /// An app can't cleanly replace its own bundle while it's running, so the
+    /// work happens outside it: the script waits for us to exit, downloads the
+    /// release asset, swaps the bundle, and reopens the app. Terminal is
+    /// launched by opening the script file — driving Terminal with AppleEvents
+    /// would need an Automation permission we'd rather not ask for.
+    ///
+    /// It fetches the asset URL resolved from the Releases API rather than
+    /// piping a remote script into bash: one less thing to trust, and what runs
+    /// is visible in the window in front of you.
+    /// Returns nil on success, or why it couldn't start.
+    static func launchUpdater(for release: LatestRelease, appPath: String) -> String? {
+        guard let asset = release.appZip else {
+            return "That release has no .zip asset to install."
+        }
+        let script = """
+        #!/bin/bash
+        set -euo pipefail
+
+        echo "Updating UpdateAll  →  \(release.tag_name)"
+        echo "Target: \(appPath)"
+        echo
+
+        # The app quits itself as it hands over; don't touch the bundle until it has.
+        printf 'Waiting for UpdateAll to quit'
+        for _ in $(seq 1 40); do
+            pgrep -x UpdateAll >/dev/null 2>&1 || break
+            printf '.'; sleep 0.25
+        done
+        echo
+
+        TMP=$(mktemp -d)
+        trap 'rm -rf "$TMP"' EXIT
+
+        echo "Downloading \(asset.name)…"
+        curl -fL --progress-bar -o "$TMP/app.zip" "\(asset.browser_download_url)"
+
+        echo "Unpacking…"
+        ditto -x -k "$TMP/app.zip" "$TMP/x"
+        NEW=$(find "$TMP/x" -maxdepth 2 -name '*.app' -print -quit)
+        [ -n "$NEW" ] || { echo "No .app inside the archive — aborting."; exit 1; }
+
+        # Downloads carry the quarantine flag; without this the first launch is
+        # blocked by Gatekeeper.
+        xattr -dr com.apple.quarantine "$NEW" 2>/dev/null || true
+
+        echo "Installing…"
+        # Keep the old bundle until the new one is in place, so a failure here
+        # doesn't leave you with no app at all.
+        BACKUP="$TMP/previous.app"
+        if [ -d "\(appPath)" ]; then mv "\(appPath)" "$BACKUP"; fi
+        if ! ditto "$NEW" "\(appPath)"; then
+            echo "Install failed — putting the previous version back."
+            rm -rf "\(appPath)"
+            [ -d "$BACKUP" ] && mv "$BACKUP" "\(appPath)"
+            exit 1
+        fi
+
+        echo
+        echo "Done. Reopening UpdateAll…"
+        open "\(appPath)"
+        """
+
+        let path = NSTemporaryDirectory() + "update-updateall-\(UUID().uuidString).command"
+        do {
+            try script.write(toFile: path, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                  ofItemAtPath: path)
+        } catch {
+            return "Couldn't write the updater script: \(error.localizedDescription)"
+        }
+
+        let open = Process()
+        open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        open.arguments = ["-a", "Terminal", path]
+        do { try open.run() } catch {
+            return "Couldn't open Terminal: \(error.localizedDescription)"
+        }
+        return nil
     }
 }
