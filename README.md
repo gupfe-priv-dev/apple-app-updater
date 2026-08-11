@@ -113,8 +113,17 @@ un-throttled check:
 
 ![Settings — Maintenance](docs/screenshot-settings-maintenance.png)
 
-It notifies and links to the release page; it doesn't download or replace
-itself. Re-run the install one-liner above to take the update.
+**Update and Restart** takes the update directly. An app can't cleanly replace
+its own bundle while it's running, so the work happens outside it: UpdateAll
+writes a script, opens it in Terminal, and quits. The script waits for the
+process to exit, downloads the release asset, strips the quarantine flag,
+swaps the bundle, and reopens the app — and you can read every line of it in
+the window while it runs.
+
+It downloads the asset resolved from the Releases API rather than piping a
+remote script into bash, and the previous bundle is moved aside rather than
+deleted, so a failed install puts the old version back instead of leaving you
+with no app.
 
 Local builds never claim a release version: only a build sitting exactly on a
 release tag stamps `1.4.1`, while anything ahead of the last tag reports
