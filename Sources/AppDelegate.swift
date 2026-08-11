@@ -428,8 +428,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let alert = NSAlert()
         alert.messageText = "Update to \(release.tag_name)?"
-        alert.informativeText = "UpdateAll will quit and the update will run in Terminal, "
-            + "then reopen. You'll see exactly what it does."
+        alert.informativeText = "UpdateAll will quit, update itself, and reopen."
         alert.addButton(withTitle: "Update and Restart")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -487,8 +486,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         let alert = NSAlert()
                         if isNew {
                             alert.messageText = "Update available: \(rel.tag_name)"
-                            alert.informativeText = "You're on \(current). Install it now? "
-                                + "UpdateAll will quit, update in Terminal, and reopen."
+                            alert.informativeText = "You're on \(current). "
+                                + "UpdateAll will quit, update itself, and reopen."
                             alert.addButton(withTitle: "Update and Restart")
                             alert.addButton(withTitle: "Open release page")
                             alert.addButton(withTitle: "Later")

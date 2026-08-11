@@ -137,17 +137,26 @@ enum SelfUpdateChecker {
 
     // MARK: Install
 
-    /// Write the updater script and hand it to Terminal, then the caller quits.
+    /// Where the updater script records what it did.
+    static var updateLogPath: String {
+        NSHomeDirectory() + "/Library/Logs/update-all-selfupdate.log"
+    }
+
+    /// Write the updater script, start it detached, and let the caller quit.
     ///
     /// An app can't cleanly replace its own bundle while it's running, so the
     /// work happens outside it: the script waits for us to exit, downloads the
-    /// release asset, swaps the bundle, and reopens the app. Terminal is
-    /// launched by opening the script file — driving Terminal with AppleEvents
-    /// would need an Automation permission we'd rather not ask for.
+    /// release asset, swaps the bundle, and reopens the app.
+    ///
+    /// It runs headless rather than in Terminal. Terminal leaves its window
+    /// sitting there afterwards — its "close on exit" behaviour is a per-profile
+    /// setting we don't control — so the update ended with a stray window to
+    /// tidy up every time. The whole thing takes a couple of seconds, so there
+    /// is little to watch; it logs to `updateLogPath` for when something goes
+    /// wrong, and restores the previous bundle if it does.
     ///
     /// It fetches the asset URL resolved from the Releases API rather than
-    /// piping a remote script into bash: one less thing to trust, and what runs
-    /// is visible in the window in front of you.
+    /// piping a remote script into bash — one less thing to trust.
     /// Returns nil on success, or why it couldn't start.
     static func launchUpdater(for release: LatestRelease, appPath: String) -> String? {
         guard let asset = release.appZip else {
@@ -156,24 +165,21 @@ enum SelfUpdateChecker {
         let script = """
         #!/bin/bash
         set -euo pipefail
-
-        echo "Updating UpdateAll  →  \(release.tag_name)"
+        exec >>"\(updateLogPath)" 2>&1
+        echo "=== $(date '+%Y-%m-%d %H:%M:%S')  UpdateAll → \(release.tag_name) ==="
         echo "Target: \(appPath)"
-        echo
 
         # The app quits itself as it hands over; don't touch the bundle until it has.
-        printf 'Waiting for UpdateAll to quit'
         for _ in $(seq 1 40); do
             pgrep -x UpdateAll >/dev/null 2>&1 || break
-            printf '.'; sleep 0.25
+            sleep 0.25
         done
-        echo
 
         TMP=$(mktemp -d)
         trap 'rm -rf "$TMP"' EXIT
 
         echo "Downloading \(asset.name)…"
-        curl -fL --progress-bar -o "$TMP/app.zip" "\(asset.browser_download_url)"
+        curl -fL -sS -o "$TMP/app.zip" "\(asset.browser_download_url)"
 
         echo "Unpacking…"
         ditto -x -k "$TMP/app.zip" "$TMP/x"
@@ -210,11 +216,13 @@ enum SelfUpdateChecker {
             return "Couldn't write the updater script: \(error.localizedDescription)"
         }
 
-        let open = Process()
-        open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        open.arguments = ["-a", "Terminal", path]
-        do { try open.run() } catch {
-            return "Couldn't open Terminal: \(error.localizedDescription)"
+        // Detached with nohup and a trailing & so it outlives this process —
+        // it has to, since its first job is to wait for us to exit.
+        let launch = Process()
+        launch.executableURL = URL(fileURLWithPath: "/bin/sh")
+        launch.arguments = ["-c", "nohup /bin/bash '\(path)' >/dev/null 2>&1 &"]
+        do { try launch.run() } catch {
+            return "Couldn't start the updater: \(error.localizedDescription)"
         }
         return nil
     }

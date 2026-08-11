@@ -320,19 +320,21 @@ final class SettingsPane: NSViewController {
         ])
     }
 
-    /// When a newer release is known, the row offers to install it outright
-    /// instead of only reporting the version.
+    /// Two lines: what's running, then whether anything newer exists. Cramming
+    /// both onto one line made a long string that had to be read to the end
+    /// before you learned the answer.
     private func updateSelfControls() -> [NSView] {
-        let version = appDelegate?.versionSummary ?? ""
+        let current = NSTextField(labelWithString: appDelegate?.versionSummary ?? "")
+        current.font = .systemFont(ofSize: 12)
+
         guard let tag = appDelegate?.updateAvailableTag else {
-            return [statusLine(.neutral, version,
+            return [current,
+                    statusLine(.good, "Up to date",
                                button: "Check for Updates", action: #selector(checkAppUpdate))]
         }
-        return [
-            statusLine(.stale, "\(version) — \(tag) available",
-                       button: "Update and Restart", action: #selector(installAppUpdate)),
-            note("Quits UpdateAll, runs the update in Terminal, and reopens it"),
-        ]
+        return [current,
+                statusLine(.stale, "\(tag) available",
+                           button: "Update and Restart", action: #selector(installAppUpdate))]
     }
 
     // MARK: building blocks ──────────────────────────────────────────────
