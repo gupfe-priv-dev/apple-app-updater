@@ -58,9 +58,9 @@ with their current state:
 | macOS system | `softwareupdate --list` | `softwareupdate --install --all` |
 | npm global packages | `npm outdated -g` | `npm install -g <pkg>@latest` |
 | Ruby gems | `gem list` + RubyGems API | `gem update <name>` |
-| Rust toolchains | — | `rustup update` |
-| pipx packages | — | `pipx upgrade-all` |
-| Claude Code CLI | — | `claude update` |
+| Rust toolchains | `rustup check` | `rustup update` |
+| pipx packages | `pipx list --json` + PyPI | `pipx upgrade <name>` |
+| Claude Code CLI | `claude --version` + npm registry | `claude update` |
 | Unmanaged apps (Sparkle) | appcast feed per app | downloads & installs DMG/ZIP/PKG |
 
 Casks are upgraded one command per token rather than in one batch: brew
@@ -70,6 +70,12 @@ fails, so one unreachable host used to take down every other cask.
 Gems are checked by listing locally and querying the RubyGems API
 concurrently. `gem outdated` asks about each gem one at a time — ~60s for 85
 gems, nearly all of it idle network wait.
+
+Every manager reports a real answer. Where a CLI has no "what's outdated" mode
+(pipx, Claude Code), the installed version is compared against the registry
+that publishes it, rather than the app claiming it can't tell — a manager that
+can't answer gets a row that says so, arrives unticked, and doesn't count
+toward the number of available updates.
 
 ---
 
