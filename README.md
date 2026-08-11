@@ -98,7 +98,28 @@ One-liner — downloads the latest release, strips the macOS quarantine xattr, a
 
 > The URL uses **jsDelivr** instead of `raw.githubusercontent.com` because some corporate proxies aggressively cache the GitHub raw URL and return stale content. jsDelivr's CDN invalidates per commit. The script itself is open — read it before you pipe it.
 
-After install, launch from Spotlight or `open /Applications/UpdateAll.app`. The app's built-in self-update checker hits the GitHub Releases API once per 24 h and shows a newer release in the window subtitle (and under Settings → Maintenance).
+After install, launch from Spotlight or `open /Applications/UpdateAll.app`.
+
+### Updating UpdateAll itself
+
+The app checks GitHub Releases once per 24 h (cached in
+`~/Library/Application Support/UpdateAll/self-update.json`) and puts a newer
+release in the window subtitle rather than interrupting with a dialog:
+
+> **Update All – Update available: v1.4.1**
+
+Settings → Maintenance shows the running version and forces an immediate,
+un-throttled check:
+
+![Settings — Maintenance](docs/screenshot-settings-maintenance.png)
+
+It notifies and links to the release page; it doesn't download or replace
+itself. Re-run the install one-liner above to take the update.
+
+Local builds never claim a release version: only a build sitting exactly on a
+release tag stamps `1.4.1`, while anything ahead of the last tag reports
+`1.4.1+2-preview (<sha>)`, so an installed copy is never confused with the
+published one.
 
 ### Prerequisites
 
