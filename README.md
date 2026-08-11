@@ -26,6 +26,18 @@ single console:
 - **Settings** is a standard preferences window at ⌘, — managers, system
   access, hidden packages, maintenance.
 
+Turn a manager off and it's skipped entirely: not scanned, not updated. One
+that isn't installed says so rather than disappearing, so the list always
+reflects everything the app knows how to update:
+
+![Settings — Managers](docs/screenshot-settings-managers.png)
+
+macOS gates the two things a system updater has to do — writing to
+`/Applications`, and running the installer as root — so both have a row here
+with their current state:
+
+![Settings — System Access](docs/screenshot-settings-system.png)
+
 ---
 
 ## What it updates
