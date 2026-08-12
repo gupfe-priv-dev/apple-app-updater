@@ -39,6 +39,11 @@ reflects everything the app knows how to update:
 
 ![Settings — Managers](docs/screenshot-settings-managers.png)
 
+Settings itself is a standard preferences window — icon toolbar, one
+pane per section, sized to whichever pane is showing:
+
+![Settings — General](docs/screenshot-settings-general.png)
+
 macOS gates the two things a system updater has to do — writing to
 `/Applications`, and running the installer as root — so both have a row here
 with their current state:
