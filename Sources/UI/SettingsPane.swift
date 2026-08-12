@@ -376,6 +376,12 @@ final class SettingsPane: NSViewController {
         let current = NSTextField(labelWithString: appDelegate?.versionSummary ?? "")
         current.font = .systemFont(ofSize: 12)
 
+        if let problem = lastCheckProblem {
+            return [current,
+                    statusLine(.warn, "Couldn't check",
+                               button: "Try Again", action: #selector(checkAppUpdate)),
+                    note(problem)]
+        }
         guard let tag = appDelegate?.updateAvailableTag else {
             return [current,
                     statusLine(.good, "Up to date",
@@ -525,8 +531,18 @@ final class SettingsPane: NSViewController {
     }
 
     @objc private func checkAppUpdate() {
-        appDelegate?.checkForAppUpdate { [weak self] _ in self?.rebuild() }
+        appDelegate?.checkForAppUpdate { [weak self] problem in
+            // Keep the reason: discarding it made a failed check redraw as
+            // "Up to date", which is the same lie the package scans are careful
+            // not to tell. GitHub's unauthenticated API allows 60 requests an
+            // hour, so "couldn't check" is a real state, not a hypothetical.
+            self?.lastCheckProblem = problem
+            self?.rebuild()
+        }
     }
+
+    /// Why the last check failed, if it did. Cleared by a successful one.
+    private var lastCheckProblem: String?
 
     @objc private func installAppUpdate() {
         appDelegate?.installLatestRelease()

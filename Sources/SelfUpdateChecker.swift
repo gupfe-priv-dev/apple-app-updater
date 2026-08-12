@@ -134,7 +134,14 @@ enum SelfUpdateChecker {
             try task.run()
             task.waitUntilExit()
             guard task.terminationStatus == 0 else {
-                return .failure(CheckError(message: "curl exited \(task.terminationStatus) (no network?)"))
+                // 22 is curl's "HTTP error" under -f. The overwhelmingly common
+                // cause here is GitHub's 60-requests-an-hour limit for
+                // unauthenticated callers, which is worth naming rather than
+                // reporting as a bare exit code.
+                let why = task.terminationStatus == 22
+                    ? "GitHub refused the request — most likely its hourly rate limit. Try again later."
+                    : "curl exited \(task.terminationStatus) (no network?)"
+                return .failure(CheckError(message: why))
             }
             let data = out.fileHandleForReading.readDataToEndOfFile()
             let release = try JSONDecoder().decode(LatestRelease.self, from: data)
