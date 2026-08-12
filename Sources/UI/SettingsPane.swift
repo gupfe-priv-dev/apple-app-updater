@@ -78,7 +78,6 @@ final class SettingsPane: NSViewController {
         self.toolList = tools
         super.init(nibName: nil, bundle: nil)
         title = section.title
-        preferredContentSize = NSSize(width: 620, height: section.preferredHeight)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
@@ -108,16 +107,17 @@ final class SettingsPane: NSViewController {
             container.widthAnchor.constraint(equalTo: scroll.widthAnchor),
         ])
 
-        // A scroll view has no intrinsic size, so without these the pane's
-        // fitting size is zero and NSTabViewController has nothing to resize
-        // the window to — every pane would inherit whatever the first one was.
-        // Deliberately weak (500): enough to give the pane a size, weak enough
-        // that it yields to the window when the window is resized.
-        let w = scroll.widthAnchor.constraint(equalToConstant: 620)
+        // No width constraint on purpose. The pane used to pin itself to 620pt,
+        // which meant every pane pushed the window back to its own idea of the
+        // width whenever it laid out — so the window shifted horizontally when
+        // you clicked something or switched panes, and a resized Settings
+        // window sprang back. The window owns its width; a pane fills it.
+        //
+        // The height hint stays, weak enough to yield, so the pane still has a
+        // size before it has laid out.
         let h = scroll.heightAnchor.constraint(equalToConstant: section.preferredHeight)
-        w.priority = NSLayoutConstraint.Priority(500)
         h.priority = NSLayoutConstraint.Priority(500)
-        NSLayoutConstraint.activate([w, h])
+        h.isActive = true
 
         view = scroll
     }
@@ -150,15 +150,20 @@ final class SettingsPane: NSViewController {
         grid.columnSpacing = 10
         grid.translatesAutoresizingMaskIntoConstraints = false
         content.addArrangedSubview(grid)
-        resizeToFitContent()
     }
 
-    /// Size the pane to what it actually contains, so no row is ever clipped and
-    /// every pane keeps the same breathing space under its last control.
-    private func resizeToFitContent() {
+    /// How tall this pane's content actually is, so no row is clipped and every
+    /// pane keeps the same breathing space under its last control.
+    ///
+    /// Deliberately a *question*, not an action. Assigning preferredContentSize
+    /// here made AppKit resize the window on every rebuild — so toggling a
+    /// checkbox snapped the window back to its fitted size, which looked like the
+    /// pane jumping, and a manually resized Settings window sprang back the
+    /// moment you clicked anything. The window controller asks for this when it
+    /// switches panes; nothing else moves the window.
+    var fittedHeight: CGFloat {
         content.layoutSubtreeIfNeeded()
-        let height = max(content.fittingSize.height, 80)
-        preferredContentSize = NSSize(width: 620, height: height)
+        return max(content.fittingSize.height, section.preferredHeight)
     }
 
     // MARK: sections ─────────────────────────────────────────────────────
