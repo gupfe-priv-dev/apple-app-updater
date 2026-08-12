@@ -135,10 +135,58 @@ remote script into bash, and the previous bundle is moved aside rather than
 deleted, so a failed install puts the old version back instead of leaving you
 with no app. What it did is in `~/Library/Logs/update-all-selfupdate.log`.
 
-Local builds never claim a release version: only a build sitting exactly on a
-release tag stamps `1.4.1`, while anything ahead of the last tag reports
-`1.4.1+2-preview (<sha>)`, so an installed copy is never confused with the
-published one.
+### Versions
+
+Computed by [GitVersion](https://gitversion.net) from the git history, using the
+same model as the Windows twin so a version string means the same thing on both:
+
+| Where you are | Version |
+|---|---|
+| exactly on a release tag | `1.4.8` |
+| three commits after it | `1.4.9-preview.3` |
+
+A preview belongs to the version it's heading *towards*, not the one it
+followed — `1.4.8` is followed by `1.4.9-preview.N`, then by the `1.4.9`
+release. Calling an unreleased build `1.4.8-preview` would claim it came
+*before* 1.4.8, when it came after, and the app would offer to "update" it to
+the release it was already ahead of.
+
+The self-update check follows semver's pre-release rule accordingly:
+`1.4.9-preview.3` is newer than `1.4.8` and older than `1.4.9`, so a preview is
+offered its own release but not the one it has passed.
+
+### Code signing
+
+macOS ties the App Management grant to the app's *designated requirement*. An
+ad-hoc signature identifies a build by its code hash, which changes every build
+— so every rebuild looked like a different app and the grant was revoked.
+
+Settings → System Access → **Code Signing** creates a self-signed certificate in
+your login keychain. The hash still changes; the requirement no longer does:
+
+```
+identifier "com.gupfe-priv-dev.update-all" and certificate leaf = H"e63c…"
+```
+
+Grant App Management once after setting it up, and it stops asking. The
+certificate is only needed by whatever *builds* the app — it is never shipped
+inside it, and the private key never leaves your keychain.
+
+That keychain does not sync to iCloud, so back the identity up:
+
+```bash
+./signing-identity.sh create              # make one (same as the Settings button)
+./signing-identity.sh export identity.b64 # base64 of a password-protected .p12
+./signing-identity.sh import identity.b64 # restore it on another Mac
+./signing-identity.sh export-pem out/     # or as key.pem + cert.pem
+./signing-identity.sh import-pem key.pem cert.pem
+```
+
+Keep the base64 and its password in a password manager. Anyone holding both can
+sign code that macOS will accept as this app.
+
+Releases built by CI are still ad-hoc signed, since the runner has no access to
+your key — installing one re-prompts for App Management once.
 
 ### Prerequisites
 

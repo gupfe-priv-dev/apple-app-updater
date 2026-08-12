@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 # Usage: features.sh <feature> <action>
-#   feature: touchid | sudoers
+#   feature: touchid | sudoers | codesign
 #   action:  status | check | enable | disable
 #
 # `status` reports on/off based on file presence (no admin needed).
@@ -15,6 +15,11 @@ ME=$(whoami)
 SUDOERS_RULE_VERSION=2
 STATE_DIR="$HOME/Library/Application Support/UpdateAll"
 SUDOERS_VERSION_FILE="$STATE_DIR/sudoers.version"
+# Common name of the self-signed identity used to sign UpdateAll.
+# Signing with a stable certificate instead of ad-hoc is what makes
+# macOS treat each rebuild as the *same* app, so the App Management
+# grant survives. Ad-hoc signatures identify a build by its hash, which
+# changes every time, so TCC revokes the grant on every rebuild.
 mkdir -p "$STATE_DIR"
 
 # Centralised rule body — keep this in sync with SUDOERS_RULE_VERSION.
@@ -105,8 +110,21 @@ case "${1:-}" in
       *) echo "Usage: $0 sudoers {status|check|enable|disable}" >&2; exit 2 ;;
     esac
     ;;
+  codesign)
+    # Delegated to signing-identity.sh so creation, export and restore all live
+    # in one place — it's bundled next to this script inside the .app.
+    _si="${0:A:h}/signing-identity.sh"
+    [[ -x "$_si" ]] || { echo "signing-identity.sh missing"; exit 1; }
+    case "${2:-}" in
+      status|check) "$_si" status ;;
+      name)         "$_si" name ;;
+      enable)       "$_si" create ;;
+      disable)      "$_si" remove ;;
+      *) echo "Usage: $0 codesign {status|check|name|enable|disable}" >&2; exit 2 ;;
+    esac
+    ;;
   *)
-    echo "Usage: $0 {touchid|sudoers} {status|check|enable|disable}" >&2
+    echo "Usage: $0 {touchid|sudoers|codesign} {status|check|enable|disable}" >&2
     exit 2
     ;;
 esac

@@ -51,8 +51,13 @@ enum SelfUpdateChecker {
         return raw.split(separator: " ").first.map(String.init) ?? raw
     }
 
-    /// True iff `remote` is strictly newer than `current`. Strips a leading
-    /// "v" on the remote tag; ignores pre-release suffixes after `-`.
+    /// True iff `remote` is strictly newer than `current`.
+    ///
+    /// Follows semver's pre-release rule, which matters here because every local
+    /// build is a pre-release: 1.4.9-preview.3 is newer than 1.4.8 but older
+    /// than 1.4.9. Comparing only the numbers would make a preview and its own
+    /// release look identical, so the preview would never be offered the release
+    /// it was previewing.
     static func isNewer(remote: String, current: String) -> Bool {
         let r = parseSemver(remote)
         let c = parseSemver(current)
@@ -60,7 +65,17 @@ enum SelfUpdateChecker {
             if r[i] > c[i] { return true }
             if r[i] < c[i] { return false }
         }
-        return false
+        // Same numbers: a release beats a pre-release of itself, and nothing
+        // beats a release.
+        return !isPrerelease(remote) && isPrerelease(current)
+    }
+
+    /// Does this version carry a pre-release suffix ("1.4.9-preview.3")?
+    private static func isPrerelease(_ s: String) -> Bool {
+        var t = s
+        if t.hasPrefix("v") { t.removeFirst() }
+        // Only after the patch segment — a "-" earlier would be malformed.
+        return t.split(separator: ".").dropFirst(2).first?.contains("-") ?? false
     }
 
     private static func parseSemver(_ s: String) -> [Int] {

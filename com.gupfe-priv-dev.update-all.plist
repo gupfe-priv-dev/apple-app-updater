@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.gunnar.update-all</string>
+    <string>com.gupfe-priv-dev.update-all</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/open</string>
         <string>-b</string>
-        <string>com.gunnar.update-all</string>
+        <string>com.gupfe-priv-dev.update-all</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

@@ -12,13 +12,13 @@ echo "==> Registering UpdateAll.app with Launch Services..."
 # again here so a Launch Services hiccup doesn't leave bundle-id lookup stale.
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
     -f "/Applications/UpdateAll.app"
-echo "    ✓ Registered (bundle id: com.gunnar.update-all)"
+echo "    ✓ Registered (bundle id: com.gupfe-priv-dev.update-all)"
 
 echo ""
 echo "==> Installing LaunchAgent (run at login)..."
-cp "$DIR/com.gunnar.update-all.plist" ~/Library/LaunchAgents/
-launchctl unload ~/Library/LaunchAgents/com.gunnar.update-all.plist 2>/dev/null || true
-launchctl load ~/Library/LaunchAgents/com.gunnar.update-all.plist 2>/dev/null || true
+cp "$DIR/com.gupfe-priv-dev.update-all.plist" ~/Library/LaunchAgents/
+launchctl unload ~/Library/LaunchAgents/com.gupfe-priv-dev.update-all.plist 2>/dev/null || true
+launchctl load ~/Library/LaunchAgents/com.gupfe-priv-dev.update-all.plist 2>/dev/null || true
 echo "    ✓ Loaded"
 
 echo ""

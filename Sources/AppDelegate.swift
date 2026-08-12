@@ -61,31 +61,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: App Management permission ────────────────────────────────────
 
-    /// State file recording that the user confirmed App Management for THIS
-    /// build of UpdateAll. We pin it to the bundle's actual codesign CDHash
-    /// (not CFBundleVersion — that doesn't change between rebuilds of the
-    /// same commit) so any rebuild forces a fresh prompt, matching macOS's
-    /// own rule that TCC is per-signature.
+    /// State file recording that the user confirmed App Management for this
+    /// *identity* of UpdateAll.
     private var appMgmtStateFile: String {
         NSHomeDirectory() + "/Library/Application Support/UpdateAll/app-management-acked"
     }
     private var _cachedBuildId: String?
+
+    /// Identity of this build, as macOS itself judges it: the designated
+    /// requirement.
+    ///
+    /// This used to be the CDHash, which changes on every single build — so the
+    /// prompt reappeared after every rebuild even when nothing about the app's
+    /// identity had changed. The designated requirement is the right key
+    /// because it's exactly what TCC matches against, and it answers both cases
+    /// correctly on its own:
+    ///
+    ///   ad-hoc signed   → `identifier "…" and cdhash H"…"`         (changes)
+    ///   certificate     → `identifier "…" and certificate leaf …`  (stable)
+    ///
+    /// So with a signing identity set up, the acknowledgement survives rebuilds
+    /// exactly as the real grant does; without one, it still re-asks.
     var currentBuildId: String {
         if let c = _cachedBuildId { return c }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        task.arguments = ["-d", "--verbose=4", Bundle.main.bundlePath]
-        let err = Pipe()
-        task.standardError = err
-        task.standardOutput = Pipe()
+        task.arguments = ["-d", "-r-", Bundle.main.bundlePath]
+        let out = Pipe()
+        task.standardOutput = out
+        task.standardError = Pipe()
         var id = "unknown"
         do {
             try task.run()
+            let data = out.fileHandleForReading.readDataToEndOfFile()
             task.waitUntilExit()
-            if let s = String(data: err.fileHandleForReading.readDataToEndOfFile(),
-                              encoding: .utf8) {
-                for line in s.components(separatedBy: "\n") where line.hasPrefix("CDHash=") {
-                    id = String(line.dropFirst("CDHash=".count))
+            if let s = String(data: data, encoding: .utf8) {
+                for line in s.components(separatedBy: "\n") where line.hasPrefix("designated =>") {
+                    id = line.trimmingCharacters(in: .whitespaces)
                     break
                 }
             }
@@ -263,6 +275,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let action = (featureStatus("touchid") == "enabled") ? "disable" : "enable"
         let result = runFeatureScript(args: ["touchid", action]) ?? "(no output)"
         showAlert(title: "Touch ID for sudo", message: result)
+    }
+
+    /// Create or remove the local signing identity. Creating it asks for
+    /// authentication once (trusting the certificate for code signing); after
+    /// the next rebuild the App Management grant stops being revoked.
+    @objc func toggleCodesign() {
+        let action = (featureStatus("codesign") == "current") ? "disable" : "enable"
+        let result = runFeatureScript(args: ["codesign", action]) ?? "(no output)"
+        showAlert(title: "Code signing identity", message: result)
     }
 
     @objc func toggleSudoers() {

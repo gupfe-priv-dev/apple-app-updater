@@ -51,7 +51,10 @@ final class SettingsViewController: NSTabViewController {
         // beyond it is chrome. (`contentRect(forFrameRect:)` can't be used —
         // it doesn't account for the toolbar.)
         let chrome = window.frame.height - view.frame.height
-        let target = chrome + pane.section.preferredHeight
+        // The pane measured itself when it built its controls; trust that
+        // over the static starting height.
+        let target = chrome + max(pane.preferredContentSize.height,
+                                  pane.section.preferredHeight)
         var frame = window.frame
         let delta = target - frame.height
         guard abs(delta) > 0.5 else { return }

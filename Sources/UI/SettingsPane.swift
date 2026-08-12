@@ -34,15 +34,17 @@ final class SettingsPane: NSViewController {
             case .maintenance: return "wrench.and.screwdriver"
             }
         }
-        /// Height the window adopts for this pane — a preferences window sizes
-        /// itself to the pane rather than making every pane share the tallest.
+        /// Starting height, used before the pane has laid out. The real height
+        /// is measured from the content once it exists (see rebuild) — a
+        /// hand-maintained number here goes stale the moment a row is added,
+        /// which is exactly how System Access ended up clipping its last row.
         var preferredHeight: CGFloat {
             switch self {
-            case .general:     return 110
+            case .general:     return 120
             case .managers:    return 400
-            case .system:      return 185
-            case .hidden:      return 145
-            case .maintenance: return 215
+            case .system:      return 250
+            case .hidden:      return 150
+            case .maintenance: return 230
             }
         }
     }
@@ -84,7 +86,7 @@ final class SettingsPane: NSViewController {
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 20
-        content.edgeInsets = NSEdgeInsets(top: 22, left: 20, bottom: 22, right: 20)
+        content.edgeInsets = NSEdgeInsets(top: 22, left: 20, bottom: 28, right: 20)
         content.translatesAutoresizingMaskIntoConstraints = false
 
         let container = FlippedView()
@@ -148,6 +150,15 @@ final class SettingsPane: NSViewController {
         grid.columnSpacing = 10
         grid.translatesAutoresizingMaskIntoConstraints = false
         content.addArrangedSubview(grid)
+        resizeToFitContent()
+    }
+
+    /// Size the pane to what it actually contains, so no row is ever clipped and
+    /// every pane keeps the same breathing space under its last control.
+    private func resizeToFitContent() {
+        content.layoutSubtreeIfNeeded()
+        let height = max(content.fittingSize.height, 80)
+        preferredContentSize = NSSize(width: 620, height: height)
     }
 
     // MARK: sections ─────────────────────────────────────────────────────
@@ -219,6 +230,7 @@ final class SettingsPane: NSViewController {
         let touchID = appDelegate?.featureCheck("touchid") == "current"
         let sudoers = appDelegate?.featureCheck("sudoers") ?? ""
         let appMgmt = appDelegate?.appMgmtAcknowledged ?? false
+        let signing = appDelegate?.featureCheck("codesign") ?? ""
 
         return NSGridView(views: [
             row("Touch ID for sudo:", [
@@ -235,6 +247,16 @@ final class SettingsPane: NSViewController {
                            button: sudoers == "current" ? "Remove" : "Install",
                            action: #selector(toggleSudoers)),
                 note("Covers /usr/sbin/installer and /usr/sbin/softwareupdate only"),
+            ]),
+            row("Code Signing:", [
+                statusLine(signing == "current" ? .good : .warn,
+                           signing == "current" ? "Stable identity — grants survive rebuilds"
+                                                : "Ad-hoc — every rebuild needs App Management again",
+                           button: signing == "current" ? "Remove" : "Set Up",
+                           action: #selector(toggleCodesign)),
+                note(signing == "current"
+                     ? "Back it up: ./signing-identity.sh export identity.b64"
+                     : "Creates a self-signed certificate so macOS sees each build as the same app"),
             ]),
             row("App Management:", [
                 statusLine(appMgmt ? .good : .warn,
@@ -439,6 +461,11 @@ final class SettingsPane: NSViewController {
 
     @objc private func toggleTouchID() {
         appDelegate?.toggleTouchID()
+        rebuild()
+    }
+
+    @objc private func toggleCodesign() {
+        appDelegate?.toggleCodesign()
         rebuild()
     }
 

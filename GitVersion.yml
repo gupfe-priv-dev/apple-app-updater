@@ -1,0 +1,26 @@
+# GitVersion configuration for UpdateAll — deliberately the same model as the
+# Windows twin (CliSync), so a version string means the same thing on both.
+#
+#   on a release tag (v1.4.8)  -> 1.4.8              official release
+#   commits after that tag     -> 1.4.9-preview.3    unreleased build
+#
+# The key property is that a preview belongs to the version it is heading
+# *towards*, not the one it followed: 1.4.8 is followed by 1.4.9-preview.N,
+# which is in turn followed by the 1.4.9 release. Anything carrying "-preview"
+# is unreleased, and the number after it is how many commits it sits ahead of
+# the last release.
+workflow: GitHubFlow/v1
+
+# Baseline for a clone with no tags at all; the tag takes over once one exists.
+next-version: '0.1.0'
+
+# Tags look like v1.4.8. The prefix must stay OPTIONAL ("?") — making it
+# mandatory also applies to next-version above, which has no prefix, and
+# GitVersion then fails to parse it.
+tag-prefix: '[vV]?'
+
+branches:
+  main:
+    regex: ^(master|main)$
+    label: preview
+    increment: Patch

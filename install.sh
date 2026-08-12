@@ -145,10 +145,10 @@ rm -rf "$DEST"
 cp -R "$TMP/extracted/$APP_NAME.app" "$DEST"
 # Strip "downloaded from the internet" tag so Gatekeeper doesn't block first launch.
 xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
-# Re-register so `open -b com.gunnar.update-all` resolves, and clear any stale
+# Re-register so `open -b com.gupfe-priv-dev.update-all` resolves, and clear any stale
 # App Management TCC entry so the new signature gets a fresh consent prompt.
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$DEST" >/dev/null 2>&1 || true
-tccutil reset SystemPolicyAppBundles com.gunnar.update-all >/dev/null 2>&1 || true
+tccutil reset SystemPolicyAppBundles com.gupfe-priv-dev.update-all >/dev/null 2>&1 || true
 echo "$T_INSTALLED"
 echo ""
 

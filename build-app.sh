@@ -23,26 +23,34 @@ mkdir -p "$APP/Contents/Resources"
 # Falls back to "dev"/"0" when not in a git checkout (e.g. unzipped tarball).
 COMMIT=$(cd "$DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo "dev")
 COMMIT_COUNT=$(cd "$DIR" 2>/dev/null && git rev-list --count HEAD 2>/dev/null || echo "0")
-# Latest release tag (e.g. v1.1.0) — strip the leading `v` for the human
-# version. Falls back to 0.0 in non-tagged checkouts.
-TAG=$(cd "$DIR" 2>/dev/null && git describe --tags --abbrev=0 2>/dev/null || echo "v0.0")
-TAG_VERSION="${TAG#v}"
-BUILD_TIME=$(date '+%Y-%m-%d %H:%M')
-# Only a build sitting exactly ON a release tag may claim that version. The
-# release workflow tags HEAD before it builds, so CI produces the clean string;
-# a local build is by definition ahead of the last release and says so. Without
-# this, a local build stamps the released version number and an installed copy
-# is indistinguishable from the published one.
+# Version model (same as the Windows twin, via GitVersion):
+#   HEAD is exactly a release tag  -> 1.4.8            official release
+#   commits after that tag         -> 1.4.9-preview.3  unreleased build
 #
-# "1.4.0+2-preview" parses as 1.4.0 for the self-update check (the segment after
-# the last dot is read up to its '-', and a non-numeric core falls back to 0),
-# so a preview build still gets offered the next real release.
-AHEAD=$(cd "$DIR" 2>/dev/null && git rev-list --count "$TAG"..HEAD 2>/dev/null || echo "0")
+# A preview belongs to the version it is heading *towards*, not the one it
+# followed — 1.4.8 is followed by 1.4.9-preview.N, then by the 1.4.9 release.
+# Naming an unreleased build "1.4.8-preview" would claim it comes *before* 1.4.8,
+# when it comes after.
+TAG=$(cd "$DIR" 2>/dev/null && git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+BUILD_TIME=$(date '+%Y-%m-%d %H:%M')
+
 if (cd "$DIR" 2>/dev/null && git describe --exact-match --tags HEAD >/dev/null 2>&1); then
-    SHORT_VERSION="$TAG_VERSION ($COMMIT, $BUILD_TIME)"
-else
-    SHORT_VERSION="$TAG_VERSION+${AHEAD}-preview ($COMMIT, $BUILD_TIME)"
+    # Sitting on the tag: that IS the release version. Taken straight from the
+    # tag rather than from GitVersion, which can't read a detached HEAD (no
+    # branch to match its config against) and returns "--no-branch-" instead.
+    VERSION="${TAG#v}"
+elif command -v gitversion >/dev/null 2>&1; then
+    VERSION=$(cd "$DIR" && gitversion /showvariable SemVer 2>/dev/null | tail -1)
 fi
+if [[ -z "${VERSION:-}" || "$VERSION" == *"no-branch"* ]]; then
+    # No GitVersion (or it couldn't tell): bump the patch by hand and count the
+    # commits since the tag, which is what GitVersion would have done.
+    AHEAD=$(cd "$DIR" 2>/dev/null && git rev-list --count "$TAG"..HEAD 2>/dev/null || echo "0")
+    _base="${TAG#v}"
+    _maj="${_base%%.*}"; _rest="${_base#*.}"; _min="${_rest%%.*}"; _pat="${_rest#*.}"
+    VERSION="${_maj}.${_min}.$((_pat + 1))-preview.${AHEAD}"
+fi
+SHORT_VERSION="$VERSION ($COMMIT, $BUILD_TIME)"
 BUILD_VERSION="$COMMIT_COUNT"
 echo "  version: $SHORT_VERSION   (build $BUILD_VERSION)"
 
@@ -68,6 +76,9 @@ rm "$APP/Contents/MacOS/UpdateAll.x86_64" "$APP/Contents/MacOS/UpdateAll.arm64"
 # All other logic is now native Swift; no Python bridges or update-all*.sh.
 cp "$DIR/features.sh" "$APP/Contents/Resources/"
 chmod +x "$APP/Contents/Resources/features.sh"
+# features.sh delegates its codesign actions to this one
+cp "$DIR/signing-identity.sh" "$APP/Contents/Resources/"
+chmod +x "$APP/Contents/Resources/signing-identity.sh"
 
 # regenerate icon if missing, then bundle
 if [[ ! -f "$DIR/AppIcon.icns" ]]; then
@@ -81,7 +92,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key><string>UpdateAll</string>
-    <key>CFBundleIdentifier</key><string>com.gunnar.update-all</string>
+    <key>CFBundleIdentifier</key><string>com.gupfe-priv-dev.update-all</string>
     <key>CFBundleName</key><string>Update All</string>
     <key>CFBundleShortVersionString</key><string>$SHORT_VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD_VERSION</string>
@@ -93,7 +104,24 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 xattr -rc "$APP"
-codesign --sign - --force --deep "$APP"
+# Sign with the local identity when one exists, ad-hoc otherwise.
+#
+# This is what decides whether the App Management grant survives a rebuild.
+# An ad-hoc signature identifies the app by its code hash, which changes on
+# every build, so macOS treats each build as a different app and revokes the
+# grant. A certificate gives a stable designated requirement, so the grant
+# sticks. Set one up in the app: Settings -> System Access -> Code signing.
+CODESIGN_CN="UpdateAll Local Signing"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CODESIGN_CN"; then
+    SIGN_ID="$CODESIGN_CN"
+    STABLE_SIGNATURE=1
+    echo "  signing with: $CODESIGN_CN (stable)"
+else
+    SIGN_ID="-"
+    STABLE_SIGNATURE=0
+    echo "  signing with: ad-hoc (App Management will need re-granting after each build)"
+fi
+codesign --sign "$SIGN_ID" --force --deep "$APP"
 
 # Copy the signed bundle from the temp build dir into the source tree. Use
 # ditto (not cp) so it doesn't drag along the source dir's FinderInfo; the
@@ -110,7 +138,12 @@ if [[ -z "${SKIP_INSTALL:-}" ]]; then
     # stale and tccd will silently deny the first cask install once it notices
     # the signature mismatch. Wiping the TCC entry forces a fresh consent
     # prompt that UpdateAll's startup probe can detect cleanly.
-    tccutil reset SystemPolicyAppBundles com.gunnar.update-all &>/dev/null || true
+    # Only wipe the TCC entry for ad-hoc builds. With a stable signature the
+    # existing grant still matches the new build, and resetting it would throw
+    # away the very thing the certificate buys.
+    if [[ "$STABLE_SIGNATURE" -eq 0 ]]; then
+        tccutil reset SystemPolicyAppBundles com.gupfe-priv-dev.update-all &>/dev/null || true
+    fi
 
     # Sync the freshly-built app to /Applications so it lives at the canonical
     # location System Settings shows when adding entries to App Management.
