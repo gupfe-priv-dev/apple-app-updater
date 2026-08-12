@@ -3,3 +3,13 @@ brew_cask_catalog.json
 brew_cask_catalog_v2.json
 UpdateAll*.app/
 AppIcon.iconset/
+
+# Signing-identity material. The private key belongs in the login keychain and
+# in a password manager — never here. These patterns are a backstop in case an
+# export is written into the repo by accident; signing-identity.sh also refuses
+# to write inside a git working tree.
+*.p12
+*.b64
+key.pem
+cert.pem
+identity.*

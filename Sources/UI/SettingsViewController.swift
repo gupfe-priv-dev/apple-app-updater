@@ -43,23 +43,38 @@ final class SettingsViewController: NSTabViewController {
     /// every native preferences window does it itself.
     override func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
         super.tabView(tabView, didSelect: item)
-        guard let pane = item?.viewController as? SettingsPane,
-              let window = view.window else { return }
+        fitWindow(to: item?.viewController as? SettingsPane, animated: true)
+    }
+
+    /// Size the window to a pane, keeping the title bar still.
+    ///
+    /// NSTabViewController supplies the toolbar and the selection but not this;
+    /// every native preferences window does it itself. It's called on selection
+    /// *and* when the window is first shown — `didSelect` never fires for the
+    /// pane that's already selected, so without the second call the window kept
+    /// whatever size it was created at until you clicked another tab, then
+    /// jumped to the right size at the next opportunity. Mid-jump the pane
+    /// hadn't drawn yet, which is what made it look momentarily empty.
+    func fitWindow(to pane: SettingsPane?, animated: Bool) {
+        guard let pane = pane ?? currentPane, let window = view.window else { return }
 
         // Chrome = titlebar + toolbar, measured rather than assumed: this
         // controller's own view *is* the pane area, so whatever the window has
         // beyond it is chrome. (`contentRect(forFrameRect:)` can't be used —
         // it doesn't account for the toolbar.)
         let chrome = window.frame.height - view.frame.height
-        // Ask the pane how tall its content is. This is the only place the
-        // Settings window is resized, so switching panes fits the content and
-        // nothing else moves the window.
         let target = chrome + pane.fittedHeight
         var frame = window.frame
         let delta = target - frame.height
         guard abs(delta) > 0.5 else { return }
         frame.size.height = target
         frame.origin.y -= delta      // grow downward, title bar stays put
-        window.setFrame(frame, display: true, animate: true)
+        window.setFrame(frame, display: true, animate: animated)
+    }
+
+    /// The pane on screen right now.
+    var currentPane: SettingsPane? {
+        let i = selectedTabViewItemIndex
+        return (i >= 0 && i < panes.count) ? panes[i] : nil
     }
 }

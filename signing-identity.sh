@@ -54,6 +54,20 @@ install_pair() {  # $1 = key.pem  $2 = cert.pem
   rm -rf "$_t"
 }
 
+# Refuse to write key material anywhere inside a git working tree. .gitignore
+# covers the obvious names, but the only reliable rule is "not in the repo" —
+# a private key that reaches a public repo lets anyone sign code macOS will
+# accept as this app.
+refuse_if_in_repo() {  # $1 = path being written
+  local dir; dir=$(cd "$(dirname "$1")" 2>/dev/null && pwd) || return 0
+  if (cd "$dir" && git rev-parse --is-inside-work-tree >/dev/null 2>&1); then
+    echo "Refusing to write '$1' — it is inside a git working tree." >&2
+    echo "Write it somewhere else, e.g. ~/Desktop, and delete it once it's in" >&2
+    echo "your password manager." >&2
+    exit 1
+  fi
+}
+
 read_password() {  # $1 = prompt
   printf '%s' "$1" >&2
   read -rs PW; echo >&2
@@ -99,6 +113,7 @@ case "${1:-}" in
       echo "Export '$CN' from Keychain Access, then: base64 -i <file.p12>" >&2
       exit 1
     fi
+    [[ -n "${2:-}" ]] && refuse_if_in_repo "$2"
     read_password 'Password to encrypt the backup: '
     _t=$(mktemp -d); trap 'rm -rf "$_t"' EXIT
     # macOS asks permission to read the private key here — expected.
@@ -126,8 +141,9 @@ case "${1:-}" in
   export-pem)
     DIR="${2:-}"; [[ -n "$DIR" ]] || { echo "Usage: $0 export-pem <dir>" >&2; exit 2; }
     have_identity || { echo "No identity named '$CN'. Run: $0 create" >&2; exit 1; }
-    mkdir -p "$DIR"
+    refuse_if_in_repo "$DIR/key.pem"
     read_password 'Temporary password (used only to move the key out of the keychain): '
+    mkdir -p "$DIR"
     _t=$(mktemp -d); trap 'rm -rf "$_t"' EXIT
     security export -k "$LOGIN_KEYCHAIN" -t identities -f pkcs12 -P "$PW" -o "$_t/id.p12"
     openssl pkcs12 -in "$_t/id.p12" -nocerts -nodes -passin "pass:$PW" -out "$DIR/key.pem" -legacy 2>/dev/null \

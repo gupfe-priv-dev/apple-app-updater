@@ -72,6 +72,10 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         settings.rebuild()
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // Size it to the pane that's showing. Without this the window keeps the
+        // size it was created at until the first tab switch — too tall for a
+        // one-row pane like General.
+        settings.fitWindow(to: nil, animated: false)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
