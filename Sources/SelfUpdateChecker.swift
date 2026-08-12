@@ -115,43 +115,67 @@ enum SelfUpdateChecker {
         var errorDescription: String? { message }
     }
 
-    /// Hit the GitHub Releases API via /usr/bin/curl. Blocking — call from a
-    /// background queue. Uses an unauthenticated request (60 req/h per IP);
-    /// our once-per-day cadence stays well under that.
-    static func fetchLatest() -> Result<LatestRelease, CheckError> {
+    /// Run curl and hand back stdout, or nil if it exited non-zero.
+    private static func curl(_ args: [String]) -> String? {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        task.arguments = [
-            "-sf", "-m", "10",
-            "-H", "Accept: application/vnd.github+json",
-            "-A", "UpdateAll/" + currentVersionRaw(),
-            "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest",
-        ]
+        task.arguments = args
         let out = Pipe()
         task.standardOutput = out
-        task.standardError  = Pipe()
+        task.standardError = Pipe()
         do {
             try task.run()
-            task.waitUntilExit()
-            guard task.terminationStatus == 0 else {
-                // 22 is curl's "HTTP error" under -f. The overwhelmingly common
-                // cause here is GitHub's 60-requests-an-hour limit for
-                // unauthenticated callers, which is worth naming rather than
-                // reporting as a bare exit code.
-                let why = task.terminationStatus == 22
-                    ? "GitHub refused the request — most likely its hourly rate limit. Try again later."
-                    : "curl exited \(task.terminationStatus) (no network?)"
-                return .failure(CheckError(message: why))
-            }
             let data = out.fileHandleForReading.readDataToEndOfFile()
-            let release = try JSONDecoder().decode(LatestRelease.self, from: data)
-            return .success(release)
-        } catch {
-            return .failure(CheckError(message: error.localizedDescription))
-        }
+            task.waitUntilExit()
+            guard task.terminationStatus == 0 else { return nil }
+            return String(data: data, encoding: .utf8)
+        } catch { return nil }
     }
 
-    /// Fallback URL when we never managed to hit the API and the user clicks
+    /// Find the latest release without touching the REST API.
+    ///
+    /// `github.com/OWNER/REPO/releases/latest` is an ordinary web page that
+    /// redirects to the tagged release, so a HEAD request hands back the version
+    /// in the Location header. That's a plain fetch, not an API call, and so is
+    /// not subject to the API's 60-requests-an-hour limit for unauthenticated
+    /// callers — a limit that is *per source IP*, meaning anything else on the
+    /// same network hitting the API can exhaust it on the app's behalf. This
+    /// checker used to fail exactly that way.
+    ///
+    /// The asset URL is by convention, since the release workflow always names
+    /// it UpdateAll-<tag>.zip, and a HEAD confirms it exists before we offer an
+    /// update we couldn't actually install.
+    static func fetchLatest() -> Result<LatestRelease, CheckError> {
+        let latestURL = "https://github.com/\(repoOwner)/\(repoName)/releases/latest"
+        guard let head = curl(["-sI", "-m", "10", "-A", "UpdateAll/" + currentVersionRaw(), latestURL]) else {
+            return .failure(CheckError(message: "Couldn't reach github.com — no network?"))
+        }
+        // "location: https://github.com/o/r/releases/tag/v1.4.9"
+        let location = head
+            .components(separatedBy: "\n")
+            .first { $0.lowercased().hasPrefix("location:") }?
+            .components(separatedBy: ":").dropFirst().joined(separator: ":")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let loc = location, let tag = loc.components(separatedBy: "/").last,
+              !tag.isEmpty, tag.first == "v" || tag.first?.isNumber == true else {
+            // A repo with no releases at all redirects to the releases index.
+            return .failure(CheckError(message: "No published release found."))
+        }
+
+        let html = "https://github.com/\(repoOwner)/\(repoName)/releases/tag/\(tag)"
+        let assetName = "UpdateAll-\(tag).zip"
+        let assetURL = "https://github.com/\(repoOwner)/\(repoName)/releases/download/\(tag)/\(assetName)"
+        // -f so a 404 is an error, -L because the download redirects to a CDN.
+        let assetExists = curl(["-sfIL", "-m", "10", "-o", "/dev/null", assetURL]) != nil
+        return .success(LatestRelease(
+            tag_name: tag,
+            html_url: html,
+            name: nil,
+            published_at: nil,
+            assets: assetExists ? [Asset(name: assetName, browser_download_url: assetURL)] : []))
+    }
+
+    /// Fallback URL when the check never succeeded and the user clicks
     /// "Open release page".
     static var releasesURL: URL {
         URL(string: "https://github.com/\(repoOwner)/\(repoName)/releases/latest")!
