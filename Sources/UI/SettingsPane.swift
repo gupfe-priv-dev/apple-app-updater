@@ -49,6 +49,11 @@ final class SettingsPane: NSViewController {
         }
     }
 
+    /// One width for every pane, so only the height changes between them.
+    static let paneWidth: CGFloat = 620
+    /// Width of the right-aligned label column, shared by all panes.
+    static let labelColumnWidth: CGFloat = 170
+
     let section: Section
     let toolList: [Tool]
     weak var appDelegate: AppDelegate?
@@ -66,7 +71,12 @@ final class SettingsPane: NSViewController {
         let s = NSProgressIndicator()
         s.style = .spinning
         s.controlSize = .small
+        // isHidden, not just isDisplayedWhenStopped: an invisible-but-present
+        // spinner still occupies its width in the stack, which pushed the
+        // Managers label 21pt left of every other pane's label column.
+        // NSStackView reclaims the space of a genuinely hidden view.
         s.isDisplayedWhenStopped = false
+        s.isHidden = true
         s.translatesAutoresizingMaskIntoConstraints = false
         s.widthAnchor.constraint(equalToConstant: 14).isActive = true
         s.heightAnchor.constraint(equalToConstant: 14).isActive = true
@@ -107,17 +117,20 @@ final class SettingsPane: NSViewController {
             container.widthAnchor.constraint(equalTo: scroll.widthAnchor),
         ])
 
-        // No width constraint on purpose. The pane used to pin itself to 620pt,
-        // which meant every pane pushed the window back to its own idea of the
-        // width whenever it laid out — so the window shifted horizontally when
-        // you clicked something or switched panes, and a resized Settings
-        // window sprang back. The window owns its width; a pane fills it.
+        // Every pane asks for the SAME width, so switching panes changes only
+        // the height. Without this each pane's width followed its own content —
+        // Managers is wide because of its long labels, System Access isn't — and
+        // the window resized sideways as you moved between them.
         //
-        // The height hint stays, weak enough to yield, so the pane still has a
-        // size before it has laid out.
+        // Weak (500) so it's a preference, not a rule: the window still wins
+        // when you resize it. What used to drag the window back to this number
+        // was the preferredContentSize assignment on every rebuild, not this
+        // constraint — that's gone, so the two coexist.
+        let w = scroll.widthAnchor.constraint(equalToConstant: Self.paneWidth)
         let h = scroll.heightAnchor.constraint(equalToConstant: section.preferredHeight)
+        w.priority = NSLayoutConstraint.Priority(500)
         h.priority = NSLayoutConstraint.Priority(500)
-        h.isActive = true
+        NSLayoutConstraint.activate([w, h])
 
         view = scroll
     }
@@ -146,6 +159,13 @@ final class SettingsPane: NSViewController {
         }
         grid.column(at: 0).xPlacement = .trailing
         grid.column(at: 1).xPlacement = .leading
+        // One fixed label column across every pane. Sized to content, each pane
+        // was only as wide as its own longest label, so the controls started at
+        // a different x in each — "Package Managers:" is shorter than
+        // "Remembered Failures:", so Managers sat noticeably further left. A
+        // shared width puts the label/control boundary in the same place
+        // everywhere, which is what makes the panes look like one window.
+        grid.column(at: 0).width = Self.labelColumnWidth
         grid.rowSpacing = 16
         grid.columnSpacing = 10
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -222,11 +242,13 @@ final class SettingsPane: NSViewController {
     /// manager is toggled.
     private func refreshAvailability() {
         guard section == .managers else { return }
+        spinner.isHidden = false
         spinner.startAnimation(nil)
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             await ToolAvailability.refresh(self.toolList)
             self.spinner.stopAnimation(nil)
+            self.spinner.isHidden = true
             self.rebuild()
         }
     }
