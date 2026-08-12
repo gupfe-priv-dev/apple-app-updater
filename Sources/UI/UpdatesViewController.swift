@@ -173,8 +173,11 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             switch self {
             case .check:   return 22
             case .manager: return 150
-            case .package: return 240
-            case .version: return 200
+            case .package: return 220
+            // Wide enough for a Chrome-length pair ("151.0.7922.109 → …138").
+            // At 200 the target version — the thing you actually want to read —
+            // was the part that got truncated away.
+            case .version: return 260
             case .status:  return 190
             }
         }
