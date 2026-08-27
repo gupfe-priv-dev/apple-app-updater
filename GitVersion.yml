@@ -12,7 +12,10 @@
 workflow: GitHubFlow/v1
 
 # Baseline for a clone with no tags at all; the tag takes over once one exists.
-next-version: '0.1.0'
+# 1.0.0 because the release history was reset — the first release of the fresh
+# history is 1.0.0, and builds before it read 1.0.0-preview.N rather than
+# restarting from 0.1.0.
+next-version: '1.0.0'
 
 # Tags look like v1.4.8. The prefix must stay OPTIONAL ("?") — making it
 # mandatory also applies to next-version above, which has no prefix, and
