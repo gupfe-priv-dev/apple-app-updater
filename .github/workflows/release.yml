@@ -23,7 +23,7 @@ on:
         required: false
         default: ""
       notes:
-        description: "Release notes (markdown). Leave empty to auto-generate from commits."
+        description: "Release notes (markdown). Leave empty to generate them from feat:/fix: commits."
         required: false
         default: ""
 
@@ -76,6 +76,33 @@ jobs:
       - name: Create local tag (so build-app.sh stamps the right version)
         run: git tag -a "${{ steps.compute.outputs.tag }}" -m "${{ steps.compute.outputs.tag }}"
 
+      - name: Generate release notes
+        id: notes
+        run: |
+          # git-cliff turns the commit range since the previous tag into notes,
+          # keeping only feat:/fix: subjects (see cliff.toml). Pinned to a
+          # version rather than "latest" so a release built today and one built
+          # next year format their notes the same way.
+          CLIFF_VER=2.13.1
+          case "$(uname -m)" in
+            arm64) TARGET=aarch64-apple-darwin ;;
+            *)     TARGET=x86_64-apple-darwin  ;;
+          esac
+          curl -fsSL --retry 3 \
+            "https://github.com/orhun/git-cliff/releases/download/v${CLIFF_VER}/git-cliff-${CLIFF_VER}-${TARGET}.tar.gz" \
+            -o /tmp/git-cliff.tar.gz
+          tar xzf /tmp/git-cliff.tar.gz -C /tmp
+          "/tmp/git-cliff-${CLIFF_VER}/git-cliff" --latest > /tmp/notes.md
+
+          # A release can legitimately contain no user-facing change — a docs
+          # pass, a CI fix. Say so, rather than publishing notes that are just
+          # a bare compare link and look like the generator broke.
+          if ! grep -q '^### ' /tmp/notes.md; then
+            { echo "_No user-facing changes in this release._"; echo; cat /tmp/notes.md; } > /tmp/notes.tmp
+            mv /tmp/notes.tmp /tmp/notes.md
+          fi
+          echo "--- generated notes ---"; cat /tmp/notes.md
+
       - name: Build .app
         env:
           SKIP_INSTALL: 1
@@ -99,5 +126,5 @@ jobs:
           if [[ -n "${{ inputs.notes }}" ]]; then
             gh release create "$TAG" --title "$TAG" --notes "${{ inputs.notes }}" "$ZIP"
           else
-            gh release create "$TAG" --title "$TAG" --generate-notes "$ZIP"
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md "$ZIP"
           fi
