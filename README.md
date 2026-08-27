@@ -28,8 +28,10 @@ single console:
 
 Updating writes to the same console, in order, and an app that's running when
 its cask is replaced is offered a clean quit and relaunch first — replacing a
-live app bundle otherwise leaves it glitchy until it's restarted. Rows that
-finish leave the table; what's still pending stays:
+live app bundle otherwise leaves it glitchy until it's restarted. A row that
+finishes stays put, greyed and unselectable, so the table becomes the report of
+the run; one that failed keeps its reason and can be ticked again. Check for
+Updates clears them:
 
 ![Updating a single package](docs/screenshot-run.png)
 
