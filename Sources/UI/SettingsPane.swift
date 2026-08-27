@@ -231,6 +231,7 @@ final class SettingsPane: NSViewController {
                       action: #selector(downloadGuardToggled(_:))),
                 stallPopup(),
                 note("A dead download host has no alternate mirror to fall back to"),
+                note("Without a limit it holds up every package queued behind it"),
             ]),
         ])
     }

@@ -170,14 +170,8 @@ struct BrewCasksTool: Tool {
             // stall guard is what stopped it, since brew reports both the same
             // way.
             let downloadFailed = failed.contains { logText.contains("Download failed on Cask '\($0)'") }
-            if downloadFailed && Settings.downloadGuardEnabled {
-                let names = failed.joined(separator: ", ")
-                Tips.postAsync(Tip(
-                    id: "download-stall-guard",
-                    text: "\(names) failed to download. Downloads are given up on after "
-                        + "\(Settings.downloadStallSeconds)s below \(Settings.downloadSpeedFloorKBps) KB/s — "
-                        + "if that host is slow rather than dead, allow it more time.",
-                    section: .general))
+            if downloadFailed, let tip = downloadTip(for: failed, log: logText) {
+                Tips.postAsync(tip)
             }
         }
         // Only a hard failure if EVERY cask failed; a partial failure still
@@ -446,6 +440,57 @@ struct BrewCasksTool: Tool {
         if await ctx.ask("Remove these with sudo?") {
             for k in stuckKegs { _ = await ctx.run(["sudo", "rm", "-rf", k]) }
             _ = await ctx.capture(["brew", "cleanup"])
+        }
+    }
+
+    // MARK: ─ download failure diagnosis ─────────────────────────────────────
+
+    /// The exit code curl printed, e.g. "curl: (35) LibreSSL SSL_connect: …".
+    /// brew passes curl's stderr straight through, so this is the one piece of
+    /// evidence that says *why* a download failed rather than just that it did.
+    /// The last one wins: with retries, the final attempt is the verdict.
+    private func curlExitCode(in log: String) -> Int? {
+        guard let re = try? NSRegularExpression(pattern: #"curl: \((\d+)\)"#) else { return nil }
+        let range = NSRange(log.startIndex..., in: log)
+        guard let match = re.matches(in: log, range: range).last,
+              let r = Range(match.range(at: 1), in: log) else { return nil }
+        return Int(log[r])
+    }
+
+    /// Turn a download failure into a tip that says something true.
+    ///
+    /// The distinction that matters: curl 28 is a timeout, so the download was
+    /// alive and we stopped it — more time might genuinely have finished it.
+    /// A connection error means the host refused or dropped us, and no amount
+    /// of extra time would have helped; offering to raise the limit there would
+    /// be advice that cannot work.
+    private func downloadTip(for failed: [String], log: String) -> Tip? {
+        let names = failed.joined(separator: ", ")
+        switch curlExitCode(in: log) {
+        case 28 where Settings.downloadGuardEnabled:
+            return Tip(
+                id: "download-timed-out",
+                text: "\(names): the download was still going but too slowly, so it was given up "
+                    + "on after \(Settings.downloadStallSeconds)s below "
+                    + "\(Settings.downloadSpeedFloorKBps) KB/s. Allow it more time if that host "
+                    + "is merely slow.",
+                section: .general)
+        case 28:
+            // Guard off, so this was curl's own connect-timeout.
+            return Tip(id: "download-timed-out",
+                       text: "\(names): the download timed out while connecting.",
+                       section: .general)
+        case .some(let code) where [5, 6, 7, 35, 52, 56].contains(code):
+            return Tip(
+                id: "download-host-unreachable",
+                text: "\(names): the download host refused or dropped the connection "
+                    + "(curl \(code)). More time wouldn't have helped — that mirror is down, "
+                    + "not slow. Worth retrying later.",
+                section: nil)
+        default:
+            return Tip(id: "download-failed",
+                       text: "\(names) failed to download. The log has brew's own reason.",
+                       section: nil)
         }
     }
 }
