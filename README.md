@@ -195,9 +195,10 @@ setting the variable.
 
 When a run turns up something worth acting on — a download given up on, say —
 UpdateAll doesn't interrupt with an alert. A **Tips** button appears in the
-action bar, and opening it shows a slim band above the buttons with the message
-and a link straight to the setting that can act on it. Dismissing one reveals
-the next.
+action bar, and opening it shows a band above the buttons with the newest tip,
+a link straight to the setting that can act on it, and a **+N** for anything
+else waiting. Expanding lists them all; each has its own dismiss, and each
+links to its own pane.
 
 An alert mid-run would block the very update you asked for, to say something
 that isn't urgent.

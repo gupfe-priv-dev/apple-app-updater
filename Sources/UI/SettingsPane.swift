@@ -40,7 +40,7 @@ final class SettingsPane: NSViewController {
         /// which is exactly how System Access ended up clipping its last row.
         var preferredHeight: CGFloat {
             switch self {
-            case .general:     return 120
+            case .general:     return 190
             case .managers:    return 400
             case .system:      return 250
             case .hidden:      return 150
@@ -182,6 +182,11 @@ final class SettingsPane: NSViewController {
     /// moment you clicked anything. The window controller asks for this when it
     /// switches panes; nothing else moves the window.
     var fittedHeight: CGFloat {
+        // Measure at the width the pane will actually be shown at. Measured at
+        // whatever width it happens to have, fittingSize under-reports and the
+        // last row gets clipped — which is how the Downloads row ended up half
+        // outside the window.
+        content.setFrameSize(NSSize(width: Self.paneWidth, height: content.frame.height))
         content.layoutSubtreeIfNeeded()
         return max(content.fittingSize.height, section.preferredHeight)
     }
@@ -225,8 +230,7 @@ final class SettingsPane: NSViewController {
                       on: Settings.downloadGuardEnabled,
                       action: #selector(downloadGuardToggled(_:))),
                 stallPopup(),
-                note("A package's download host has no alternate mirror, so a dead one"),
-                note("otherwise holds up every package queued behind it"),
+                note("A dead download host has no alternate mirror to fall back to"),
             ]),
         ])
     }

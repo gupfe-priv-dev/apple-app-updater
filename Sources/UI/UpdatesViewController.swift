@@ -56,9 +56,9 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
     private var tipsButton: NSButton!
     private var tipBar: NSView!
     private var tipBarHeight: NSLayoutConstraint!
-    private var tipLabel: NSTextField!
-    private var tipActionButton: NSButton!
+    private var tipStack: NSStackView!
     private var tipsOpen = false
+    private var tipsExpanded = false
 
     /// Elapsed-time heartbeat. Silent installers (a cask downloading, a
     /// `softwareupdate` that prints nothing for minutes) would otherwise look
@@ -155,76 +155,128 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
 
     // MARK: tips ─────────────────────────────────────────────────────────
 
-    /// A slim band above the action bar. Zero-height and invisible until a tip
-    /// exists and the user asks to see it — the button is the notification,
-    /// the band is the message, and neither steals focus mid-run.
+    /// A band above the action bar listing what the app noticed. Collapsed it
+    /// shows the newest tip and a "+N" for the rest; expanded it lists them
+    /// all. Zero-height when there's nothing to say, so it costs no space in
+    /// the normal case, and it never steals focus mid-run.
     private func buildTipBar() -> NSView {
         let bar = NSView()
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.wantsLayer = true
         bar.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.10).cgColor
-        bar.clipsToBounds = true          // so its content vanishes at height 0
+        bar.clipsToBounds = true          // so rows vanish cleanly at height 0
 
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: "lightbulb.fill", accessibilityDescription: nil)
-        icon.contentTintColor = .systemOrange
-        icon.setContentHuggingPriority(.required, for: .horizontal)
-
-        tipLabel = NSTextField(labelWithString: "")
-        tipLabel.font = .systemFont(ofSize: 11)
-        tipLabel.textColor = .labelColor
-        tipLabel.lineBreakMode = .byTruncatingTail
-        tipLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        tipActionButton = NSButton(title: "Open Settings", target: self,
-                                   action: #selector(openTipSettings))
-        tipActionButton.bezelStyle = .inline
-        tipActionButton.controlSize = .small
-        tipActionButton.font = .systemFont(ofSize: 11)
-
-        let close = NSButton(title: "", target: self, action: #selector(dismissTip))
-        close.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")
-        close.isBordered = true
-        close.bezelStyle = .inline
-        close.controlSize = .small
-
-        let stack = NSStackView(views: [icon, tipLabel, NSView(), tipActionButton, close])
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
+        tipStack = NSStackView()
+        tipStack.orientation = .vertical
+        tipStack.alignment = .leading
+        tipStack.spacing = 0
+        tipStack.translatesAutoresizingMaskIntoConstraints = false
 
         let rule = NSBox()
         rule.boxType = .separator
         rule.translatesAutoresizingMaskIntoConstraints = false
 
         bar.addSubview(rule)
-        bar.addSubview(stack)
+        bar.addSubview(tipStack)
         NSLayoutConstraint.activate([
             rule.topAnchor.constraint(equalTo: bar.topAnchor),
             rule.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
             rule.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
-            stack.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
-            stack.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            tipStack.topAnchor.constraint(equalTo: bar.topAnchor),
+            tipStack.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
+            tipStack.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
         ])
         return bar
     }
 
+    /// Height of one tip row. The band is a multiple of this, so the expanded
+    /// height is predictable rather than depending on text wrapping.
+    private static let tipRowHeight: CGFloat = 30
+    /// Beyond this the band would start eating the table it sits above.
+    private static let tipRowsVisibleMax = 5
+
+    /// One line of the band. `toggle` is the "+N"/"Show less" control, present
+    /// only on the first row.
+    private func tipRow(_ tip: Tip, toggle: NSButton?) -> NSView {
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "lightbulb.fill", accessibilityDescription: nil)
+        icon.contentTintColor = .systemOrange
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let label = NSTextField(labelWithString: tip.text)
+        label.font = .systemFont(ofSize: 11)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        var controls: [NSView] = [icon, label, NSView()]
+
+        if tip.section != nil {
+            let open = NSButton(title: "Open Settings", target: self,
+                                action: #selector(openTipSettings(_:)))
+            open.bezelStyle = .inline
+            open.controlSize = .small
+            open.font = .systemFont(ofSize: 11)
+            open.identifier = NSUserInterfaceItemIdentifier(tip.id)
+            controls.append(open)
+        }
+        if let toggle { controls.append(toggle) }
+
+        let close = NSButton(title: "", target: self, action: #selector(dismissTip(_:)))
+        close.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")
+        close.bezelStyle = .inline
+        close.controlSize = .small
+        close.identifier = NSUserInterfaceItemIdentifier(tip.id)
+        controls.append(close)
+
+        let row = NSStackView(views: controls)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.heightAnchor.constraint(equalToConstant: Self.tipRowHeight).isActive = true
+        return row
+    }
+
     @objc private func tipsChanged() { refreshTips() }
 
-    /// Reconcile button and band with what's actually pending.
+    /// Rebuild button and band from what's actually pending. Cheap enough to
+    /// redo wholesale — there are never many tips — and that keeps the band
+    /// from drifting out of sync with the list the way incremental edits do.
     private func refreshTips() {
         let tips = Tips.all
         tipsButton?.isHidden = tips.isEmpty
         tipsButton?.title = tips.count > 1 ? "Tips (\(tips.count))" : "Tips"
-        if tips.isEmpty { tipsOpen = false }
+        if tips.isEmpty { tipsOpen = false; tipsExpanded = false }
+        if tips.count < 2 { tipsExpanded = false }
 
-        if let tip = tips.first {
-            tipLabel?.stringValue = tip.text
-            tipActionButton?.isHidden = tip.section == nil
+        tipStack?.arrangedSubviews.forEach {
+            tipStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
         }
-        tipBarHeight?.constant = (tipsOpen && !tips.isEmpty) ? 34 : 0
+
+        guard tipsOpen, !tips.isEmpty, let stack = tipStack else {
+            tipBarHeight?.constant = 0
+            return
+        }
+
+        let hidden = tips.count - 1
+        var toggle: NSButton?
+        if hidden > 0 {
+            let b = NSButton(title: tipsExpanded ? "Show less" : "+\(hidden)",
+                             target: self, action: #selector(toggleTipsExpanded))
+            b.bezelStyle = .inline
+            b.controlSize = .small
+            b.font = .systemFont(ofSize: 11)
+            toggle = b
+        }
+
+        let shown = tipsExpanded ? Array(tips.prefix(Self.tipRowsVisibleMax)) : [tips[0]]
+        for (i, tip) in shown.enumerated() {
+            let row = tipRow(tip, toggle: i == 0 ? toggle : nil)
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        tipBarHeight?.constant = CGFloat(shown.count) * Self.tipRowHeight
     }
 
     @objc private func toggleTips() {
@@ -232,16 +284,24 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         refreshTips()
     }
 
-    @objc private func openTipSettings() {
-        guard let section = Tips.all.first?.section else { return }
-        (view.window?.windowController as? MainWindowController)?.openSettings(on: section)
+    @objc private func toggleTipsExpanded() {
+        tipsExpanded.toggle()
+        refreshTips()
     }
 
-    /// Dismissing is per-tip, not "clear all": the next one takes its place so
-    /// a second tip isn't lost behind the first.
-    @objc private func dismissTip() {
-        guard let tip = Tips.all.first else { return }
-        Tips.dismiss(tip.id)
+    /// The window's controller here is an NSObject that happens to own the
+    /// window, not an NSWindowController — so `window.windowController` is
+    /// always nil. It *is* the window's delegate, which is how we reach it.
+    @objc private func openTipSettings(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue,
+              let section = Tips.all.first(where: { $0.id == id })?.section else { return }
+        (view.window?.delegate as? MainWindowController)?.openSettings(on: section)
+    }
+
+    /// Dismissing is per-tip, not "clear all": the rest stay listed.
+    @objc private func dismissTip(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        Tips.dismiss(id)
     }
 
     /// Re-partition the scanned rows against the current hidden list, so
