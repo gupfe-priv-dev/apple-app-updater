@@ -120,13 +120,27 @@ struct BrewCasksTool: Tool {
         for token in tokens {
             ctx.line("")
             ctx.line("==> Upgrading \(token)")
-            let cmd = "brew upgrade --cask --greedy '\(token)' 2>&1 | tee -a '\(log)'"
-            let status = await ctx.run(["/bin/sh", "-c", cmd],
+            // pipefail, and bash rather than sh to guarantee it: without it the
+            // pipeline's status is tee's, which is always 0, so a cask whose
+            // download failed was reported as upgraded. That's how a LibreOffice
+            // download returning HTTP 500 still ended the run as "✓ done".
+            let cmd = "set -o pipefail; brew upgrade --cask --greedy '\(token)' 2>&1 | tee -a '\(log)'"
+            let status = await ctx.run(["/bin/bash", "-c", cmd],
                                        env: ["HOMEBREW_DOWNLOAD_CONCURRENCY": "1"])
             if status != 0 { failed.append(token) }
         }
         let logText = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(atPath: log)
+
+        // Second opinion, independent of exit codes: brew names the cask it
+        // couldn't fetch. Belt and braces, because a tool reporting success for
+        // work it didn't do is the worst failure this app can have.
+        for token in tokens where !failed.contains(token) {
+            if logText.contains("Download failed on Cask '\(token)'")
+                || logText.contains("Error: \(token): ") {
+                failed.append(token)
+            }
+        }
 
         await handleStuckCasks(in: logText, ctx)
         await stripQuarantine(ctx)
@@ -134,16 +148,28 @@ struct BrewCasksTool: Tool {
         await relaunchApps(relaunch, ctx)
 
         if !failed.isEmpty {
+            let succeeded = tokens.count - failed.count
             ctx.line("")
-            ctx.line("⚠ \(failed.count) cask\(failed.count == 1 ? "" : "s") failed — the rest upgraded fine:")
+            // Only claim others went fine when some actually did — this said
+            // "the rest upgraded fine" even when the failure was the only cask
+            // attempted.
+            ctx.line(succeeded > 0
+                ? "⚠ \(failed.count) of \(tokens.count) casks failed; the other \(succeeded) upgraded fine:"
+                : "⚠ \(failed.count == 1 ? "This cask" : "Every cask") failed to upgrade:")
             for t in failed { ctx.line("   • \(t)") }
-            ctx.line("  Usually transient (network) or a deprecated cask; will retry next run.")
+            // And don't promise an automatic retry: a failure is remembered, so
+            // the row comes back flagged and unticked rather than running again
+            // on its own.
+            ctx.line("  Often transient (a download that didn't complete) or a deprecated cask.")
+            ctx.line("  It'll be listed again next scan, flagged and unticked — tick it to retry.")
         }
         // Only a hard failure if EVERY cask failed; a partial failure still
         // applied the others, so don't flag the whole section red.
         if failed.count == tokens.count {
             return InstallOutcome(.failed,
-                "all \(tokens.count) cask upgrade(s) failed: \(failed.joined(separator: ", "))",
+                tokens.count == 1
+                    ? "\(failed[0]) failed to upgrade"
+                    : "all \(tokens.count) cask upgrades failed: \(failed.joined(separator: ", "))",
                 failedItems: failed)
         }
         return .partial(failed)

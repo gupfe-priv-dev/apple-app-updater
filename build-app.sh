@@ -31,6 +31,16 @@ COMMIT_COUNT=$(cd "$DIR" 2>/dev/null && git rev-list --count HEAD 2>/dev/null ||
 # followed — 1.4.8 is followed by 1.4.9-preview.N, then by the 1.4.9 release.
 # Naming an unreleased build "1.4.8-preview" would claim it comes *before* 1.4.8,
 # when it comes after.
+# Refresh tags first. The release tag is created by CI, so a local checkout
+# that hasn't fetched still thinks the previous release is the latest — and then
+# stamps a build as a preview of a version that already shipped. Quiet, short
+# timeout, and failure is fine: offline just means we use what we have.
+# No `timeout` on a stock macOS, so bound a stalled fetch with git's own
+# low-speed limits rather than a command that isn't there — which would
+# fail instantly and, behind `|| true`, never fetch at all.
+(cd "$DIR" 2>/dev/null && GIT_TERMINAL_PROMPT=0 \
+   GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=10 \
+   git fetch --tags --quiet 2>/dev/null) || true
 TAG=$(cd "$DIR" 2>/dev/null && git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
 BUILD_TIME=$(date '+%Y-%m-%d %H:%M')
 

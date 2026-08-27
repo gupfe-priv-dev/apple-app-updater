@@ -675,15 +675,13 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             setStatus(text)
             emptyLabel.stringValue = "Everything is up to date."
         } else {
-            // Rows that updated are no longer pending work, so they leave the
-            // table — it lists what's outstanding, not a history. They stayed
-            // visible with their ✓ for the duration of the run, and the console
-            // and log keep the record.
+            // Finished rows stay until the next scan, greyed and unselectable.
+            // Removing them made the run's result vanish the moment it
+            // completed, leaving no way to see what had just been done; keeping
+            // them turns the table into the report of the run, and Check for
+            // Updates clears it.
             let done = rows.filter { $0.didSucceed }.count
-            rows.removeAll { $0.didSucceed }
-            let stillPending = rows.count
-            // Reload *after* the removal — the reload above ran before it, so
-            // without this the table keeps showing the rows that just left.
+            let stillPending = rows.filter { !$0.didSucceed && !$0.isUnknown }.count
             table.reloadData()
             refreshCounts()
             switch (done, stillPending) {
@@ -880,7 +878,9 @@ extension UpdatesViewController: NSTableViewDataSource, NSTableViewDelegate {
                  return f }()
 
         cell.alignment = .natural
-        cell.textColor = .labelColor
+        // A finished row is history, not pending work: greyed so the eye skips
+        // it and what's left to do still stands out.
+        cell.textColor = item.didSucceed ? .tertiaryLabelColor : .labelColor
         cell.font = .systemFont(ofSize: 12)
         cell.toolTip = nil
 
@@ -895,6 +895,12 @@ extension UpdatesViewController: NSTableViewDataSource, NSTableViewDelegate {
             cell.toolTip = item.token == item.name ? item.name : "\(item.name)  (\(item.token))"
         case .version:
             cell.attributedStringValue = versionText(item)
+            if item.didSucceed {
+                cell.attributedStringValue = NSAttributedString(
+                    string: item.available,
+                    attributes: [.foregroundColor: NSColor.tertiaryLabelColor,
+                                 .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)])
+            }
             cell.toolTip = item.current == "—" ? nil : "\(item.current) → \(item.available)"
         case .status:
             cell.stringValue = item.status

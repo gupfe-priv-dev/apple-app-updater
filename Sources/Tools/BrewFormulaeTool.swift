@@ -57,8 +57,11 @@ struct BrewFormulaeTool: Tool {
         // package manager) and auto-repair them with `brew link --overwrite`.
         let log = NSTemporaryDirectory() + "ua-formulae-\(UUID().uuidString).log"
         let targets = names.map { "'\($0)'" }.joined(separator: " ")
-        let cmd = "brew upgrade --formula \(targets) 2>&1 | tee '\(log)'"
-        let status = await ctx.run(["/bin/sh", "-c", cmd],
+        // pipefail so the pipeline reports brew's status rather than tee's,
+        // which is always 0. (The still-outdated re-check below already caught
+        // most of this, but the exit code should be true on its own.)
+        let cmd = "set -o pipefail; brew upgrade --formula \(targets) 2>&1 | tee '\(log)'"
+        let status = await ctx.run(["/bin/bash", "-c", cmd],
                                    env: ["HOMEBREW_DOWNLOAD_CONCURRENCY": "1"])
         let logText = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(atPath: log)
