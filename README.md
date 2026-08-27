@@ -116,10 +116,9 @@ After install, launch from Spotlight or `open /Applications/UpdateAll.app`.
 ### Updating UpdateAll itself
 
 The app checks GitHub Releases once per 24 h (cached in
-`~/Library/Application Support/UpdateAll/self-update.json`) and puts a newer
-release in the window subtitle rather than interrupting with a dialog:
-
-> **Update All – Update available: v1.4.1**
+`~/Library/Application Support/UpdateAll/self-update.json`) and puts the newer
+release's tag in the window subtitle — `Update All – Update available: …` —
+rather than interrupting with a dialog.
 
 Settings → Maintenance shows the running version and forces an immediate,
 un-throttled check:
@@ -132,8 +131,15 @@ writes a script, starts it detached, and quits. The script waits for the
 process to exit, downloads the release asset, strips the quarantine flag,
 swaps the bundle, and reopens the app — a couple of seconds, no window.
 
-It downloads the asset resolved from the Releases API rather than piping a
-remote script into bash, and the previous bundle is moved aside rather than
+The release is resolved without the GitHub API: `/releases/latest` is an
+ordinary web page that redirects to the newest tag, so a plain HEAD request
+answers the question. The API's unauthenticated limit is 60 requests per hour
+**per source IP**, which a shared office or VPN address can exhaust between
+them — a check that then reports "up to date" purely because it was rate
+limited is worse than no check at all.
+
+It downloads that asset rather than piping a remote script into bash, and the
+previous bundle is moved aside rather than
 deleted, so a failed install puts the old version back instead of leaving you
 with no app. What it did is in `~/Library/Logs/update-all-selfupdate.log`.
 
@@ -144,18 +150,18 @@ same model as the Windows twin so a version string means the same thing on both:
 
 | Where you are | Version |
 |---|---|
-| exactly on a release tag | `1.4.8` |
-| three commits after it | `1.4.9-preview.3` |
+| exactly on a release tag `X.Y.Z` | `X.Y.Z` |
+| N commits after that tag | `X.Y.(Z+1)-preview.N` |
 
 A preview belongs to the version it's heading *towards*, not the one it
-followed — `1.4.8` is followed by `1.4.9-preview.N`, then by the `1.4.9`
-release. Calling an unreleased build `1.4.8-preview` would claim it came
-*before* 1.4.8, when it came after, and the app would offer to "update" it to
-the release it was already ahead of.
+followed: a release is followed by previews of the **next** patch, then by that
+patch's own release. Naming an unreleased build `X.Y.Z-preview` would claim it
+came *before* `X.Y.Z`, when it came after — and the app would offer to "update"
+it to a release it was already ahead of.
 
-The self-update check follows semver's pre-release rule accordingly:
-`1.4.9-preview.3` is newer than `1.4.8` and older than `1.4.9`, so a preview is
-offered its own release but not the one it has passed.
+The self-update check follows semver's pre-release rule accordingly, so a
+preview sorts after the release it followed and before the one it's heading
+towards: it gets offered its own release, but not the one it has passed.
 
 ### Code signing
 
