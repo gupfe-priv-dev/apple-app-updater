@@ -126,7 +126,7 @@ struct BrewCasksTool: Tool {
             // download returning HTTP 500 still ended the run as "✓ done".
             let cmd = "set -o pipefail; brew upgrade --cask --greedy '\(token)' 2>&1 | tee -a '\(log)'"
             let status = await ctx.run(["/bin/bash", "-c", cmd],
-                                       env: ["HOMEBREW_DOWNLOAD_CONCURRENCY": "1"])
+                                       env: BrewEnv.download())
             if status != 0 { failed.append(token) }
         }
         let logText = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
@@ -162,6 +162,23 @@ struct BrewCasksTool: Tool {
             // on its own.
             ctx.line("  Often transient (a download that didn't complete) or a deprecated cask.")
             ctx.line("  It'll be listed again next scan, flagged and unticked — tick it to retry.")
+
+            // A cask has one URL and no mirror list, so a slow host can't be
+            // routed around — only waited for or given up on. When the failure
+            // was specifically a download, say which knob decides that. The
+            // wording stays honest: we know the download failed, not that the
+            // stall guard is what stopped it, since brew reports both the same
+            // way.
+            let downloadFailed = failed.contains { logText.contains("Download failed on Cask '\($0)'") }
+            if downloadFailed && Settings.downloadGuardEnabled {
+                let names = failed.joined(separator: ", ")
+                Tips.postAsync(Tip(
+                    id: "download-stall-guard",
+                    text: "\(names) failed to download. Downloads are given up on after "
+                        + "\(Settings.downloadStallSeconds)s below \(Settings.downloadSpeedFloorKBps) KB/s — "
+                        + "if that host is slow rather than dead, allow it more time.",
+                    section: .general))
+            }
         }
         // Only a hard failure if EVERY cask failed; a partial failure still
         // applied the others, so don't flag the whole section red.

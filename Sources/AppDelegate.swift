@@ -16,6 +16,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         AppPaths.ensure()
+        // Write the brew curl config up front rather than at the first
+        // download, so it exists to be inspected and a run never has to stop
+        // to create it.
+        CurlConfig.write()
         buildToolList()
 
         main = MainWindowController(tools: toolList, appDelegate: self)

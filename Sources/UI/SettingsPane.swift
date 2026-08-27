@@ -188,12 +188,45 @@ final class SettingsPane: NSViewController {
 
     // MARK: sections ─────────────────────────────────────────────────────
 
+    /// Pairs of (floor, window) rather than two free-form number fields: the
+    /// two values only mean anything together, and a field would happily accept
+    /// "0", which disables the guard while looking like it's on.
+    private static let stallPresets: [(kbps: Int, seconds: Int, title: String)] = [
+        (50, 30,  "after 30 seconds below 50 KB/s"),
+        (50, 60,  "after 1 minute below 50 KB/s"),
+        (50, 180, "after 3 minutes below 50 KB/s"),
+        (10, 300, "after 5 minutes below 10 KB/s"),
+    ]
+
+    /// Held so the checkbox can grey it out; the window owns the actual view.
+    private weak var stallPreset: NSPopUpButton?
+
+    private func stallPopup() -> NSPopUpButton {
+        let pop = NSPopUpButton(frame: .zero, pullsDown: false)
+        pop.addItems(withTitles: Self.stallPresets.map(\.title))
+        let current = (Settings.downloadSpeedFloorKBps, Settings.downloadStallSeconds)
+        pop.selectItem(at: Self.stallPresets.firstIndex { ($0.kbps, $0.seconds) == current } ?? 1)
+        pop.target = self
+        pop.action = #selector(stallPresetChanged(_:))
+        pop.isEnabled = Settings.downloadGuardEnabled
+        stallPreset = pop
+        return pop
+    }
+
     private func generalGrid() -> NSGridView {
         NSGridView(views: [
             row("Launch Behavior:", [
                 check("Check for updates when UpdateAll opens",
                       on: Settings.scanOnLaunch, action: #selector(scanOnLaunchToggled(_:))),
                 note("Off leaves the table empty until you press Check for Updates"),
+            ]),
+            row("Downloads:", [
+                check("Give up on a download that stalls",
+                      on: Settings.downloadGuardEnabled,
+                      action: #selector(downloadGuardToggled(_:))),
+                stallPopup(),
+                note("A package's download host has no alternate mirror, so a dead one"),
+                note("otherwise holds up every package queued behind it"),
             ]),
         ])
     }
@@ -482,6 +515,17 @@ final class SettingsPane: NSViewController {
 
     @objc private func scanOnLaunchToggled(_ sender: NSButton) {
         Settings.scanOnLaunch = sender.state == .on
+    }
+
+    @objc private func downloadGuardToggled(_ sender: NSButton) {
+        Settings.downloadGuardEnabled = sender.state == .on
+        stallPreset?.isEnabled = sender.state == .on
+    }
+
+    @objc private func stallPresetChanged(_ sender: NSPopUpButton) {
+        let preset = Self.stallPresets[sender.indexOfSelectedItem]
+        Settings.downloadSpeedFloorKBps = preset.kbps
+        Settings.downloadStallSeconds   = preset.seconds
     }
 
     @objc private func managerToggled(_ sender: NSButton) {

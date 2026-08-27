@@ -62,7 +62,7 @@ struct BrewFormulaeTool: Tool {
         // most of this, but the exit code should be true on its own.)
         let cmd = "set -o pipefail; brew upgrade --formula \(targets) 2>&1 | tee '\(log)'"
         let status = await ctx.run(["/bin/bash", "-c", cmd],
-                                   env: ["HOMEBREW_DOWNLOAD_CONCURRENCY": "1"])
+                                   env: BrewEnv.download())
         let logText = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(atPath: log)
         await handleLinkConflicts(in: logText, ctx)

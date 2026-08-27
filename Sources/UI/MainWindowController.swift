@@ -55,6 +55,16 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     /// Settings, in a panel of its own. Reused across opens so it keeps its
     /// position, and refreshed each time since feature state (Touch ID,
     /// sudoers) can change outside the app.
+    /// Open Settings on a particular pane — what a tip's "Open Settings"
+    /// button uses, so the user lands on the control being talked about
+    /// instead of on whichever pane happened to be showing last.
+    func openSettings(on section: SettingsPane.Section) {
+        showSettings()
+        if let index = SettingsPane.Section.allCases.firstIndex(of: section) {
+            settings.selectedTabViewItemIndex = index
+        }
+    }
+
     @objc func showSettings() {
         if settingsWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),

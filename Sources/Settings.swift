@@ -73,6 +73,44 @@ enum Settings {
         set { defaults.set(newValue, forKey: scanOnLaunchKey) }
     }
 
+    // MARK: downloads ────────────────────────────────────────────────────
+    // A cask has one URL and no mirror list, so a stalled host can't be routed
+    // around — it can only be given up on. These feed the curl config handed to
+    // UpdateAll's own brew runs (see CurlConfig); they are not global Homebrew
+    // settings and don't affect `brew` in a terminal.
+
+    private static let dlGuardKey   = "downloadGuardEnabled"
+    private static let dlFloorKey   = "downloadSpeedFloorKBps"
+    private static let dlStallKey   = "downloadStallSeconds"
+    private static let dlConnectKey = "downloadConnectTimeout"
+
+    /// On by default: without it, one dead mirror blocks every package queued
+    /// behind it for as long as the user is willing to wait.
+    static var downloadGuardEnabled: Bool {
+        get { defaults.object(forKey: dlGuardKey) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: dlGuardKey); CurlConfig.write() }
+    }
+
+    /// Throughput floor, KB/s. Below this for `downloadStallSeconds`, curl aborts.
+    static var downloadSpeedFloorKBps: Int {
+        get { defaults.object(forKey: dlFloorKey) as? Int ?? 50 }
+        set { defaults.set(newValue, forKey: dlFloorKey); CurlConfig.write() }
+    }
+
+    /// How long throughput may stay under the floor before giving up.
+    static var downloadStallSeconds: Int {
+        get { defaults.object(forKey: dlStallKey) as? Int ?? 60 }
+        set { defaults.set(newValue, forKey: dlStallKey); CurlConfig.write() }
+    }
+
+    /// Cap on the TCP/TLS connect phase. The LibreOffice mirror connected in
+    /// 40 ms and then never completed its TLS handshake, so this is the guard
+    /// that catches a host which accepts a socket and then goes silent.
+    static var downloadConnectTimeout: Int {
+        get { defaults.object(forKey: dlConnectKey) as? Int ?? 15 }
+        set { defaults.set(newValue, forKey: dlConnectKey); CurlConfig.write() }
+    }
+
     // MARK: layout ───────────────────────────────────────────────────────
 
     /// Remembered console height so the split doesn't reset every launch.
