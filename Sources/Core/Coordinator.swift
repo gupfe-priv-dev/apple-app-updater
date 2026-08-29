@@ -36,7 +36,9 @@ final class Coordinator {
     weak var host: CoordinatorHost?
 
     private(set) var isRunning = false
-    private var aborted = false
+    /// Read by the view when a tool reports failure, to tell "this broke" from
+    /// "the user pressed Stop".
+    private(set) var aborted = false
     private var task: Task<Void, Never>?
 
     init(host: CoordinatorHost) { self.host = host }
@@ -119,7 +121,8 @@ final class Coordinator {
                 if Thread.isMainThread { host?.appendConsole(s) }
                 else { DispatchQueue.main.async { host?.appendConsole(s) } }
             },
-            ask: { [weak host] q in await host?.ask(q) ?? false })
+            ask: { [weak host] q in await host?.ask(q) ?? false },
+            cancelled: { [weak self] in self?.aborted ?? false })
     }
 
     func abort() { aborted = true; runner.interrupt() }

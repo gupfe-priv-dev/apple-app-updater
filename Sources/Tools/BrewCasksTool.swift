@@ -147,6 +147,16 @@ struct BrewCasksTool: Tool {
         await cleanup(ctx)
         await relaunchApps(relaunch, ctx)
 
+        // Stopped, not failed. brew dies on SIGINT with a failure status like
+        // any other error, so without this the run ends by claiming the cask
+        // failed and will come back flagged — neither of which is true.
+        if ctx.isCancelled {
+            ctx.line("")
+            ctx.line("■ Stopped before finishing. Nothing was flagged — the next scan")
+            ctx.line("  works out what is still outdated.")
+            return failed.isEmpty ? .ok : .failed("stopped")
+        }
+
         if !failed.isEmpty {
             let succeeded = tokens.count - failed.count
             ctx.line("")

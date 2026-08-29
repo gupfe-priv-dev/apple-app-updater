@@ -769,6 +769,12 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         // failed. A section-level failure with no per-item detail taints every
         // item it was asked to update — better a false flag the user can clear
         // than a silent repeat next run.
+        // Stopping a run is not a package failing. The tool reports .failed
+        // either way — SIGINT kills brew mid-download, so the exit code says
+        // "failed" — but flagging what the user deliberately interrupted means
+        // it comes back unchecked next scan, blamed for obeying. Record
+        // nothing: the next scan re-derives what is actually outdated.
+        let stopped = coordinator?.aborted == true
         for item in items {
             let ok: Bool
             switch outcome.state {
@@ -776,10 +782,14 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             case .failed:                   ok = false
             case .skipped, .unavailable:    continue   // nothing was attempted
             }
-            History.record(tool: toolID, token: item.token, ok: ok, exitCode: ok ? 0 : 1)
+            if !stopped {
+                History.record(tool: toolID, token: item.token, ok: ok, exitCode: ok ? 0 : 1)
+            }
             if let row = rows.first(where: { $0.toolID == toolID && $0.token == item.token }) {
-                row.didSucceed = ok
-                row.status = ok ? "✓ updated" : "⚠ failed"
+                // A stopped item stays selectable — it was never tried, so it
+                // shouldn't grey out like something that finished.
+                row.didSucceed = stopped ? false : ok
+                row.status = stopped ? "■ stopped" : (ok ? "✓ updated" : "⚠ failed")
                 row.isSelected = false
             }
         }
@@ -789,7 +799,8 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             console.writeNote(failed.isEmpty ? "   ✓ done"
                                              : "   ✓ done, \(failed.count) failed")
         case .failed:
-            console.writeNote("   ✗ \(outcome.message ?? "failed")")
+            console.writeNote(stopped ? "   ■ stopped"
+                                      : "   ✗ \(outcome.message ?? "failed")")
         case .skipped:
             console.writeNote("   ⊘ \(outcome.message ?? "skipped")")
         case .unavailable:

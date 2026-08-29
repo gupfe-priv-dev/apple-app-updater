@@ -6,14 +6,23 @@ final class RunContext {
     let runner: ProcessRunner
     private let emitter: (String) -> Void
     private let asker: (String) async -> Bool
+    private let cancelled: () -> Bool
 
     init(runner: ProcessRunner,
          emit: @escaping (String) -> Void,
-         ask: @escaping (String) async -> Bool) {
+         ask: @escaping (String) async -> Bool,
+         cancelled: @escaping () -> Bool = { false }) {
         self.runner = runner
         self.emitter = emit
         self.asker = ask
+        self.cancelled = cancelled
     }
+
+    /// True once the user has pressed Stop. A tool's command fails on SIGINT
+    /// exactly as it would on a real error, so without asking, every tool
+    /// reports a cancellation as a failure and tells the user it will be
+    /// flagged — which is now untrue.
+    var isCancelled: Bool { cancelled() }
 
     /// Append text to the live console (already on/handed to the main queue).
     func emit(_ text: String) { emitter(text) }
