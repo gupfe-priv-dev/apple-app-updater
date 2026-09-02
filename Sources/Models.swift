@@ -64,9 +64,15 @@ struct InstallOutcome {
     /// ok (brew casks upgrade one token per command, so a single bad download
     /// shouldn't fail the section). Feeds the per-row failure memory.
     var failedItems: [String]
+    /// Tokens the user chose not to update this run. Distinct from failed: they
+    /// were never attempted, so they must not be recorded either way — and
+    /// certainly not reported as updated.
+    var skippedItems: [String]
 
-    init(_ state: State, _ message: String? = nil, failedItems: [String] = []) {
-        self.state = state; self.message = message; self.failedItems = failedItems
+    init(_ state: State, _ message: String? = nil,
+         failedItems: [String] = [], skippedItems: [String] = []) {
+        self.state = state; self.message = message
+        self.failedItems = failedItems; self.skippedItems = skippedItems
     }
 
     static let ok          = InstallOutcome(.ok)

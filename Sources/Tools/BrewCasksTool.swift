@@ -79,7 +79,8 @@ struct BrewCasksTool: Tool {
         await restoreDriftedCasks(ctx)
         // Quit apps that are about to be replaced while open (updating a running
         // app can leave it glitchy until restart). Relaunched after the upgrade.
-        let relaunch = await quitRunningApps(ctx, only: only)
+        let running = await quitRunningApps(ctx, only: only)
+        let relaunch = running.relaunch
 
         // Which casks are actually outdated (greedy), minus manual-installer
         // casks brew won't auto-upgrade anyway.
@@ -89,6 +90,8 @@ struct BrewCasksTool: Tool {
         if let only = only { tokens = tokens.filter { only.contains($0) } }
         let manual = await manualInstallerCasks(tokens, ctx)
         tokens = tokens.filter { !manual.contains($0) }
+        let skipped = Array(running.skip).sorted()
+        tokens = tokens.filter { !running.skip.contains($0) }
 
         // Disabled casks are never "outdated", so we won't try to upgrade them —
         // but still offer to remove the dead ones. A --dry-run surfaces the
@@ -102,11 +105,15 @@ struct BrewCasksTool: Tool {
         }
 
         if tokens.isEmpty {
-            ctx.line("✓ All casks up to date")
+            // "up to date" would be a lie when the only reason there's nothing
+            // left is that the user skipped it.
+            ctx.line(skipped.isEmpty
+                     ? "✓ All casks up to date"
+                     : "✓ Nothing left to update — \(skipped.count) skipped this run")
             await stripQuarantine(ctx)
             await cleanup(ctx)
             await relaunchApps(relaunch, ctx)
-            return .ok
+            return InstallOutcome(.ok, nil, skippedItems: skipped)
         }
 
         // Upgrade each cask on its OWN command. brew's batch upgrade prefetches
@@ -191,9 +198,9 @@ struct BrewCasksTool: Tool {
                 tokens.count == 1
                     ? "\(failed[0]) failed to upgrade"
                     : "all \(tokens.count) cask upgrades failed: \(failed.joined(separator: ", "))",
-                failedItems: failed)
+                failedItems: failed, skippedItems: skipped)
         }
-        return .partial(failed)
+        return InstallOutcome(.ok, nil, failedItems: failed, skippedItems: skipped)
     }
 
     // MARK: running apps ──────────────────────────────────────────────────
@@ -203,7 +210,7 @@ struct BrewCasksTool: Tool {
     /// from its bundle — can break the live instance until it's relaunched. So
     /// we offer to quit them cleanly first; the returned names are relaunched
     /// once the upgrade finishes.
-    private func quitRunningApps(_ ctx: RunContext, only: Set<String>?) async -> [String] {
+    private func quitRunningApps(_ ctx: RunContext, only: Set<String>?) async -> RunningApps {
         let outdated = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--quiet"])
         var tokens = outdated.output.split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -212,7 +219,7 @@ struct BrewCasksTool: Tool {
         // so don't bother asking the user to quit them.
         let manual = await manualInstallerCasks(tokens, ctx)
         tokens = tokens.filter { !manual.contains($0) }
-        guard !tokens.isEmpty else { return [] }
+        guard !tokens.isEmpty else { return RunningApps() }
 
         let appsByToken = await caskAppArtifacts(tokens, ctx)
         let running = runningAppBundleNames()
@@ -221,27 +228,53 @@ struct BrewCasksTool: Tool {
             for app in apps where running.contains(app) { openApps.insert(app) }
         }
         let display = openApps.map { $0.removingSuffix(".app") }.sorted()
-        guard !display.isEmpty else { return [] }
+        guard !display.isEmpty else { return RunningApps() }
 
         ctx.line("")
         ctx.line("⚠ These apps are open and about to be updated:")
         for d in display { ctx.line("   • \(d)") }
         ctx.line("  Updating an app while it's running can leave it glitchy until you")
         ctx.line("  restart it. Best to quit them first — they'll reopen after updating.")
-        guard await ctx.ask("Quit \(display.count) running app(s) and relaunch after updating? "
-                            + "(\(display.joined(separator: ", ")))") else {
-            ctx.line("⊘ Left open — restart any that misbehave after the update.")
-            return []
-        }
 
-        var quit: [String] = []
-        for app in display {
-            ctx.line("⏻ Quitting \(app)…")
-            _ = await ctx.capture(["osascript", "-e", "tell application \"\(app)\" to quit"])
-            if await waitForQuit(app) { quit.append(app) }
-            else { ctx.line("   (\(app) didn't quit — updating in place; restart it if needed)") }
+        // Three answers, not two. "Update anyway" leaves a live app running on a
+        // replaced bundle, and quitting is not always acceptable either — the
+        // app being updated may be the one you are working in. Leaving it for
+        // the next run is the honest third option, and costs nothing: the cask
+        // stays listed.
+        let choice = await ctx.choose(
+            "\(display.count) app(s) about to be updated are open: "
+            + "\(display.joined(separator: ", "))",
+            ["Quit and Relaunch", "Skip These This Run", "Update Anyway"])
+
+        // Tokens whose app is one of the open ones — what "skip" applies to.
+        let openTokens = Set(appsByToken
+            .filter { _, apps in apps.contains { openApps.contains($0) } }
+            .map { $0.key })
+
+        switch choice {
+        case 1:
+            ctx.line("⊘ Skipped this run: \(openTokens.sorted().joined(separator: ", "))")
+            ctx.line("  Still listed — they'll be offered again next scan.")
+            return RunningApps(skip: openTokens)
+        case 2:
+            ctx.line("⊘ Left open — restart any that misbehave after the update.")
+            return RunningApps()
+        default:
+            var quit: [String] = []
+            for app in display {
+                ctx.line("⏻ Quitting \(app)…")
+                _ = await ctx.capture(["osascript", "-e", "tell application \"\(app)\" to quit"])
+                if await waitForQuit(app) { quit.append(app) }
+                else { ctx.line("   (\(app) didn't quit — updating in place; restart it if needed)") }
+            }
+            return RunningApps(relaunch: quit)
         }
-        return quit
+    }
+
+    /// What to do about casks whose app is currently open.
+    private struct RunningApps {
+        var relaunch: [String] = []     // quit, and reopen when the upgrade ends
+        var skip: Set<String> = []      // leave for the next run
     }
 
     /// token → app-bundle names it installs, from the cask's `app` artifacts.

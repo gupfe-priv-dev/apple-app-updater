@@ -6,16 +6,25 @@ final class RunContext {
     let runner: ProcessRunner
     private let emitter: (String) -> Void
     private let asker: (String) async -> Bool
+    private let chooser: (String, [String]) async -> Int
     private let cancelled: () -> Bool
 
     init(runner: ProcessRunner,
          emit: @escaping (String) -> Void,
          ask: @escaping (String) async -> Bool,
+         choose: @escaping (String, [String]) async -> Int = { _, _ in 0 },
          cancelled: @escaping () -> Bool = { false }) {
         self.runner = runner
         self.emitter = emit
         self.asker = ask
+        self.chooser = choose
         self.cancelled = cancelled
+    }
+
+    /// A question with more than two answers. Returns the index of the chosen
+    /// option. Some decisions genuinely have three: yes, no, and not now.
+    func choose(_ question: String, _ options: [String]) async -> Int {
+        await chooser(question, options)
     }
 
     /// True once the user has pressed Stop. A tool's command fails on SIGINT

@@ -775,7 +775,10 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         // it comes back unchecked next scan, blamed for obeying. Record
         // nothing: the next scan re-derives what is actually outdated.
         let stopped = coordinator?.aborted == true
-        for item in items {
+        // Deliberately not attempted this run — neither a success nor a
+        // failure, so nothing is recorded and the row stays tickable.
+        let skipped = Set(outcome.skippedItems)
+        for item in items where !skipped.contains(item.token) {
             let ok: Bool
             switch outcome.state {
             case .ok:                       ok = !failed.contains(item.token)
@@ -790,6 +793,14 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
                 // shouldn't grey out like something that finished.
                 row.didSucceed = stopped ? false : ok
                 row.status = stopped ? "■ stopped" : (ok ? "✓ updated" : "⚠ failed")
+                row.isSelected = false
+            }
+        }
+
+        for token in outcome.skippedItems {
+            if let row = rows.first(where: { $0.toolID == toolID && $0.token == token }) {
+                row.didSucceed = false
+                row.status = "⊘ skipped"
                 row.isSelected = false
             }
         }
@@ -827,6 +838,22 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
             let answer = alert.runModal() == .alertFirstButtonReturn
             console.writeNote("   ? \(question) → \(answer ? "yes" : "no")")
             cont.resume(returning: answer)
+        }
+    }
+
+    /// Multiple-choice sibling of `ask`. The first option is the default, so a
+    /// plain Return keeps the previous behaviour of the two-button prompts.
+    func choose(_ question: String, _ options: [String]) async -> Int {
+        await withCheckedContinuation { cont in
+            let alert = NSAlert()
+            alert.messageText = "Update All"
+            alert.informativeText = question
+            for option in options { alert.addButton(withTitle: option) }
+            NSApp.activate(ignoringOtherApps: true)
+            let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            let picked = options.indices.contains(index) ? options[index] : options[0]
+            console.writeNote("   ? \(question) → \(picked)")
+            cont.resume(returning: options.indices.contains(index) ? index : 0)
         }
     }
 

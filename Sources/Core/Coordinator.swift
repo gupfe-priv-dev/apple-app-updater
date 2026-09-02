@@ -21,6 +21,7 @@ protocol CoordinatorHost: AnyObject {
     func toolSkipped(_ index: Int, reason: String)
     /// Ask the user a yes/no question via native UI.
     func ask(_ question: String) async -> Bool
+    func choose(_ question: String, _ options: [String]) async -> Int
     /// The whole run finished.
     func runDidFinish(_ mode: Coordinator.Mode, aborted: Bool)
 }
@@ -122,6 +123,7 @@ final class Coordinator {
                 else { DispatchQueue.main.async { host?.appendConsole(s) } }
             },
             ask: { [weak host] q in await host?.ask(q) ?? false },
+            choose: { [weak host] q, opts in await host?.choose(q, opts) ?? 0 },
             cancelled: { [weak self] in self?.aborted ?? false })
     }
 
