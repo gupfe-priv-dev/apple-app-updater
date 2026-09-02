@@ -197,10 +197,10 @@ final class SettingsPane: NSViewController {
     /// two values only mean anything together, and a field would happily accept
     /// "0", which disables the guard while looking like it's on.
     private static let stallPresets: [(kbps: Int, seconds: Int, title: String)] = [
-        (50, 30,  "after 30 seconds below 50 KB/s"),
-        (50, 60,  "after 1 minute below 50 KB/s"),
-        (50, 180, "after 3 minutes below 50 KB/s"),
-        (10, 300, "after 5 minutes below 10 KB/s"),
+        (20, 60,  "after 1 minute below 20 KB/s"),
+        (10, 60,  "after 1 minute below 10 KB/s"),
+        (10, 180, "after 3 minutes below 10 KB/s"),
+        (5,  300, "after 5 minutes below 5 KB/s"),
     ]
 
     /// Held so the checkbox can grey it out; the window owns the actual view.
@@ -230,7 +230,7 @@ final class SettingsPane: NSViewController {
                       on: Settings.downloadGuardEnabled,
                       action: #selector(downloadGuardToggled(_:))),
                 stallPopup(),
-                note("A dead download host has no alternate mirror to fall back to"),
+                note("A download that can't beat this for a minute would take hours"),
                 note("Without a limit it holds up every package queued behind it"),
             ]),
         ])

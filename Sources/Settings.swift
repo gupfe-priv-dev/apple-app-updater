@@ -92,15 +92,44 @@ enum Settings {
     }
 
     /// Throughput floor, KB/s. Below this for `downloadStallSeconds`, curl aborts.
+    ///
+    /// Deliberately low. The failure worth catching is a transfer going
+    /// *nowhere*, which sits at 0 B/s; "slow" is not the same thing and is
+    /// usually recoverable. A 50 KB/s floor aborted real ghcr.io downloads —
+    /// a bottle manifest and an openssl blob in one run — because curl measures
+    /// the average over the whole transfer, so a server that takes its time
+    /// answering drags a small file under the floor no matter how quickly the
+    /// bytes themselves would arrive.
+    ///
+    /// It still needs margin over the rate worth rejecting, though: measured
+    /// against a 4.8 KB/s crawl, a 5 KB/s floor never fires, because the
+    /// bursts keep nudging the average back over the line and the timer
+    /// restarts. 10 KB/s catches that crawl in 61s and leaves healthy traffic
+    /// alone. Below it, a large download would take many hours.
     static var downloadSpeedFloorKBps: Int {
-        get { defaults.object(forKey: dlFloorKey) as? Int ?? 50 }
+        get { migrated(); return defaults.object(forKey: dlFloorKey) as? Int ?? 10 }
         set { defaults.set(newValue, forKey: dlFloorKey); CurlConfig.write() }
     }
 
     /// How long throughput may stay under the floor before giving up.
     static var downloadStallSeconds: Int {
-        get { defaults.object(forKey: dlStallKey) as? Int ?? 60 }
+        get { migrated(); return defaults.object(forKey: dlStallKey) as? Int ?? 60 }
         set { defaults.set(newValue, forKey: dlStallKey); CurlConfig.write() }
+    }
+
+    /// Settings stored before the floor was lowered keep their old, too-strict
+    /// values — a new default only applies where nothing was saved. Anything
+    /// from the old range is moved onto the new scale once.
+    private static let dlSchemaKey = "downloadGuardSchema"
+    private static func migrated() {
+        guard defaults.integer(forKey: dlSchemaKey) < 2 else { return }
+        defaults.set(2, forKey: dlSchemaKey)
+        // Every value on the old scale was chosen against a 50 KB/s ladder, so
+        // none of them mean what they used to. Move any stored pair onto the
+        // new default rather than trying to map old intent onto a new axis.
+        guard defaults.object(forKey: dlFloorKey) != nil else { return }
+        defaults.set(10, forKey: dlFloorKey)
+        defaults.set(60, forKey: dlStallKey)
     }
 
     /// Cap on the TCP/TLS connect phase. The LibreOffice mirror connected in

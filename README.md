@@ -176,7 +176,7 @@ and nothing is written to a shell profile:
 
 ```
 connect-timeout = 15
-speed-limit = 51200
+speed-limit = 10240
 speed-time = 60
 ```
 
@@ -184,6 +184,18 @@ Deliberately no `max-time`. A total cap can't tell a slow download from a dead
 one and would kill a 285 MB DMG on a hotel line at the 90% mark;
 `speed-limit`/`speed-time` abort only a transfer that is going nowhere. The
 threshold is in Settings → General → Downloads.
+
+The floor is deliberately low. curl measures the *average* rate over the whole
+transfer, so a server that takes its time answering drags even a 2 KB file
+under a high floor no matter how fast the bytes themselves arrive — a 50 KB/s
+floor aborted a bottle manifest and an openssl blob from `ghcr.io` in a single
+run, both of which brew then retried successfully.
+
+The floor still needs margin over the rate worth rejecting. Measured against a
+4.8 KB/s crawl, a 5 KB/s floor never fires at all — the bursts keep nudging the
+average back over the line and curl restarts the timer. 10 KB/s catches that
+crawl in 61s, catches a dead host in 60s, and leaves both a slow-to-answer 2 KB
+file and a healthy transfer alone.
 
 One caveat worth knowing if you edit this by hand: Homebrew passes `--config`
 to *every* curl call, including `curl --version`. Point `HOMEBREW_CURLRC` at a
