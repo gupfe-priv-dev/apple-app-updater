@@ -86,6 +86,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     ///
     /// So with a signing identity set up, the acknowledgement survives rebuilds
     /// exactly as the real grant does; without one, it still re-asks.
+    /// Sentinel for "codesign could not be read", kept out of band from any
+    /// real requirement string.
+    let unknownBuildId = "unknown"
+
     var currentBuildId: String {
         if let c = _cachedBuildId { return c }
         let task = Process()
@@ -94,7 +98,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let out = Pipe()
         task.standardOutput = out
         task.standardError = Pipe()
-        var id = "unknown"
+        var id = unknownBuildId
         do {
             try task.run()
             let data = out.fileHandleForReading.readDataToEndOfFile()
@@ -111,13 +115,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     var appMgmtAcknowledged: Bool {
+        // "unknown" means codesign couldn't be read — which happens if the
+        // bundle is being replaced at that moment, as it is during a rebuild.
+        // Treat that as "can't judge" rather than "different app": nagging for
+        // a re-grant on every launch because of a transient read failure is
+        // worse than trusting the grant, and a genuinely missing permission
+        // still surfaces as a real failure on the first cask install.
+        guard currentBuildId != unknownBuildId else { return true }
         guard let s = try? String(contentsOfFile: appMgmtStateFile, encoding: .utf8) else { return false }
-        return s.trimmingCharacters(in: .whitespacesAndNewlines) == currentBuildId
+        let stored = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A stored "unknown" is a poisoned record from an earlier failed read,
+        // not a real identity, so it can never match. Ignore it.
+        guard stored != unknownBuildId else { return true }
+        return stored == currentBuildId
     }
 
     private func markAppMgmtAcknowledged() {
         let dir = (appMgmtStateFile as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        // Never persist a failed read: it would mismatch every later launch and
+        // ask for a re-grant that isn't needed.
+        guard currentBuildId != unknownBuildId else { return }
         try? currentBuildId.write(toFile: appMgmtStateFile, atomically: true, encoding: .utf8)
     }
 
