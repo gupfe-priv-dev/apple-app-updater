@@ -14,9 +14,20 @@ struct BrewCasksTool: Tool {
         await BrewTapTrust.ensure(ctx)
         // --verbose adds the version delta: "token (cur) != latest".
         let r = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--verbose"])
-        let parsed = r.output.split(separator: "\n")
+        let lines = r.output.split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            .compactMap(parseOutdatedLine)
+        let (tokenLines, noise) = lines.reduce(into: ([String](), [String]())) { acc, line in
+            let first = line.split(separator: " ").first.map(String.init) ?? line
+            if Self.isCaskToken(first) { acc.0.append(line) } else { acc.1.append(line) }
+        }
+        // Don't swallow it: brew is reporting a real problem with a tap, it just
+        // isn't a package.
+        if !noise.isEmpty {
+            ctx.line("")
+            ctx.line("ℹ brew printed a message that isn't a package (ignored here):")
+            for n in noise.prefix(4) { ctx.line("   \(n)") }
+        }
+        let parsed = tokenLines.compactMap(parseOutdatedLine)
         // Drop "installer manual" casks (e.g. battle-net): brew lists them as
         // outdated under --greedy but refuses to upgrade them, so they'd show
         // a perpetual "update available" that Apply Updates can never clear.
@@ -24,6 +35,21 @@ struct BrewCasksTool: Tool {
         let items = parsed.filter { !manual.contains($0.token) }
             .map { UpdateItem($0.token, current: $0.cur, latest: $0.latest) }
         return .from(items)
+    }
+
+    /// A cask token: lowercase, optionally tap-qualified. Anything else on a
+    /// line of `brew outdated` output is not a package.
+    ///
+    /// ProcessRunner merges stderr into stdout, and a cask calling a deprecated
+    /// API makes brew print a multi-line warning there. Taking the first word of
+    /// every line turned "Warning:", "Please" and a tap path into three
+    /// packages — which the table showed with no version, and which the upgrade
+    /// path would have handed straight to `brew upgrade --cask`.
+    private static let caskTokenPattern = try! NSRegularExpression(
+        pattern: "^[a-z0-9][a-z0-9@._+-]*(/[a-z0-9][a-z0-9@._+-]*){0,2}$")
+
+    static func isCaskToken(_ s: String) -> Bool {
+        caskTokenPattern.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
     }
 
     /// Parse a `brew outdated --verbose` line: "token (cur) != latest".
@@ -86,7 +112,8 @@ struct BrewCasksTool: Tool {
         // casks brew won't auto-upgrade anyway.
         let outdated = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--quiet"])
         var tokens = outdated.output.split(separator: "\n")
-            .map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && Self.isCaskToken($0) }
         if let only = only { tokens = tokens.filter { only.contains($0) } }
         let manual = await manualInstallerCasks(tokens, ctx)
         tokens = tokens.filter { !manual.contains($0) }
@@ -213,7 +240,8 @@ struct BrewCasksTool: Tool {
     private func quitRunningApps(_ ctx: RunContext, only: Set<String>?) async -> RunningApps {
         let outdated = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--quiet"])
         var tokens = outdated.output.split(separator: "\n")
-            .map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && Self.isCaskToken($0) }
         if let only = only { tokens = tokens.filter { only.contains($0) } }
         // manual-installer casks (e.g. battle-net) won't actually be upgraded,
         // so don't bother asking the user to quit them.
