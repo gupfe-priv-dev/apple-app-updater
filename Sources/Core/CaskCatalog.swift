@@ -77,13 +77,28 @@ final class CaskCatalog {
     /// (e.g. LibreOffice 26.x → libreoffice, not libreoffice-still 25.x).
     func find(_ appName: String, installedVersion: String?) -> CaskCandidate? {
         let key = appName.lowercased().removingSuffix(".app")
-        guard let cands = index[key], !cands.isEmpty else { return nil }
+        guard var cands = index[key], !cands.isEmpty else { return nil }
         if cands.count == 1 { return cands[0] }
+
+        // "beyond-compare" and "beyond-compare@4" are the same product pinned to
+        // different releases: prefer the unpinned one rather than treating them
+        // as rival candidates.
+        let plain = cands.filter { !$0.token.contains("@") }
+        if !plain.isEmpty { cands = plain }
+        if cands.count == 1 { return cands[0] }
+
         func major(_ s: String) -> Int { Version.firstInt(s) ?? -1 }
         if let iv = installedVersion, !iv.isEmpty {
             let m = major(iv)
-            if let same = cands.first(where: { major($0.version) == m }) { return same }
+            let sameMajor = cands.filter { major($0.version) == m }
+            if sameMajor.count == 1 { return sameMajor[0] }
         }
-        return cands.max(by: { major($0.version) < major($1.version) })
+
+        // Still more than one genuinely different cask installs an app of this
+        // name — "Microsoft Word" comes from both microsoft-office and
+        // microsoft-office-businesspro. Picking the highest version would be a
+        // guess, and a wrong guess here means offering to replace a working
+        // install with a different product. Say nothing instead.
+        return nil
     }
 }

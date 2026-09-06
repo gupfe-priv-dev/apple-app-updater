@@ -150,10 +150,18 @@ enum Registry {
                 entry = RegistryEntry(manager: "sparkle", feed_url: feed)
             } else if fm.fileExists(atPath: "\(appsDir)/\(name)/Contents/Frameworks/Electron Framework.framework") {
                 entry = RegistryEntry(manager: "electron")
+            } else if Self.installedByPackage(name) {
+                entry = RegistryEntry(manager: "installer")
             } else {
                 entry = RegistryEntry(manager: "unmanaged")
             }
-            let cask = catalog.find(name, installedVersion: hasPlist ? installedVer(name) : nil)
+            // Only apps nothing else looks after get a cask suggestion. Adopting
+            // one that a vendor installer or the App Store owns replaces a copy
+            // something else is updating — Microsoft Office is the same bundle
+            // whether it came from the Store, Microsoft's own installer, or a
+            // cask, and only the last of those may be handed to brew.
+            let eligible = entry.manager == "unmanaged"
+            let cask = eligible ? catalog.find(name, installedVersion: hasPlist ? installedVer(name) : nil) : nil
             if let cask = cask { entry.brew_cask_available = cask.token }
             emit("  + \(name)  [\(entry.manager)]\(cask.map { "  → brew cask: \($0.token)" } ?? "")\n")
             registry[name] = entry; changed = true
@@ -170,6 +178,7 @@ enum Registry {
         }
         let sparkle  = grouped { $0.manager == "sparkle" }
         let electron = grouped { $0.manager == "electron" }
+        let installer = grouped { $0.manager == "installer" }
         let brewable = grouped { $0.brew_cask_available != nil }
         let orphan   = grouped { $0.manager == "unmanaged" && $0.brew_cask_available == nil }
         func list(_ title: String, _ names: [String]) {
@@ -178,6 +187,7 @@ enum Registry {
         }
         list("Sparkle (self-update on launch):", sparkle)
         list("Electron (self-update on launch):", electron)
+        list("Installed by a package — its own installer updates it:", installer)
         list("Brew cask available (offered below):", brewable)
         list("Unmanaged — no auto-update detected (check manually):", orphan)
 
@@ -276,5 +286,28 @@ enum Registry {
         if let data = try? JSONSerialization.data(withJSONObject: set.sorted(), options: [.prettyPrinted]) {
             try? data.write(to: URL(fileURLWithPath: path))
         }
+    }
+
+    /// Did an installer package put this app here?
+    ///
+    /// `pkgutil` knows which receipt owns a path, and a vendor installer (Office
+    /// via Microsoft AutoUpdate, say) leaves one. Such an app is already looked
+    /// after, and replacing it with a cask would fight whatever installed it.
+    ///
+    /// Spawning pkgutil per app is not free, so this is only asked where the
+    /// answer changes the outcome — an app that is neither brew's, the App
+    /// Store's, Sparkle's nor Electron's.
+    static func installedByPackage(_ appName: String) -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/sbin/pkgutil")
+        task.arguments = ["--file-info", "/Applications/\(appName)"]
+        let out = Pipe()
+        task.standardOutput = out
+        task.standardError = Pipe()
+        guard (try? task.run()) != nil else { return false }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        return text.contains("pkgid:")
     }
 }
