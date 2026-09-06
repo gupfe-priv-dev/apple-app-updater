@@ -59,36 +59,85 @@ enum Registry {
     /// pkg receipt id → cask token, for casks that install a package rather
     /// than an app bundle. Populated by `brewManagedApps()`.
     static var brewOwnedPkgIDs: [String: String] = [:]
+    /// app bundle id → cask token, harvested from casks' `uninstall: quit:`.
+    static var brewOwnedBundleIDs: [String: String] = [:]
 
+    /// /Applications app name → cask token, for everything Homebrew installed.
+    ///
+    /// Read from the Caskroom on disk rather than by asking `brew info`, which
+    /// spawns Ruby and resolves every cask. brew already recorded all of this
+    /// when it installed:
+    ///
+    ///   - an app cask stages a symlink pointing at /Applications/Foo.app, so
+    ///     the mapping is a readlink;
+    ///   - a pkg cask stages the .pkg instead and has no app to link, but its
+    ///     saved cask JSON names the receipt it leaves (`uninstall: pkgutil:`)
+    ///     and the bundle ids it has to stop (`uninstall: quit:`) — which is
+    ///     where Homebrew's bundle identifiers actually live.
     static func brewManagedApps() -> [String: String] {
-        let casks = Shell.capture(["brew", "list", "--cask"]).out
-            .split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init)
-        guard !casks.isEmpty else { return [:] }
-        let r = Shell.capture(["brew", "info", "--cask", "--json=v2"] + casks)
-        guard let data = r.out.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let arr = obj["casks"] as? [[String: Any]] else { return [:] }
+        let prefix = Shell.capture(["brew", "--prefix"]).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let caskroom = (prefix.isEmpty ? "/opt/homebrew" : prefix) + "/Caskroom"
+        let fm = FileManager.default
+        guard let tokens = try? fm.contentsOfDirectory(atPath: caskroom) else { return [:] }
+
         var result: [String: String] = [:]
+        var linked = Set<String>()
         brewOwnedPkgIDs = [:]
-        for c in arr {
-            guard let token = c["token"] as? String else { continue }
-            for art in (c["artifacts"] as? [[String: Any]]) ?? [] {
-                // A cask that installs a pkg owns no .app artifact at all — it
-                // declares the receipt it leaves behind instead. PowerShell is
-                // one: brew put it there, and without this it looks like a
-                // vendor installer did.
-                for u in (art["uninstall"] as? [[String: Any]]) ?? [] {
-                    if let one = u["pkgutil"] as? String { brewOwnedPkgIDs[one] = token }
-                    for id in (u["pkgutil"] as? [Any]) ?? [] {
-                        if let s = id as? String { brewOwnedPkgIDs[s] = token }
+        brewOwnedBundleIDs = [:]
+
+        for token in tokens where !token.hasPrefix(".") {
+            let tokenDir = "\(caskroom)/\(token)"
+            for version in (try? fm.contentsOfDirectory(atPath: tokenDir)) ?? [] {
+                let versionDir = "\(tokenDir)/\(version)"
+                if version == ".metadata" { continue }
+                for entry in (try? fm.contentsOfDirectory(atPath: versionDir)) ?? []
+                where entry.hasSuffix(".app") {
+                    let staged = "\(versionDir)/\(entry)"
+                    let target = (try? fm.destinationOfSymbolicLink(atPath: staged)) ?? staged
+                    if target.hasPrefix("/Applications/") {
+                        result[(target as NSString).lastPathComponent] = token
+                    } else {
+                        result[entry] = token          // copied, not linked
                     }
+                    linked.insert(token)
                 }
-                for n in (art["app"] as? [Any]) ?? [] { if let s = n as? String { result[s] = token } }
-                for u in (art["uninstall"] as? [[String: Any]]) ?? [] {
-                    for p in (u["delete"] as? [Any]) ?? [] {
-                        if let path = p as? String, path.hasPrefix("/Applications/"),
-                           path.hasSuffix(".app"), !path.contains("*") {
-                            result[(path as NSString).lastPathComponent] = token
+            }
+        }
+
+        // Casks that stage a .pkg have no app to link, and their saved cask
+        // JSON is not dependable — powershell's records the receipt it leaves,
+        // zoom's is empty. Ask brew about just those, which is a far shorter
+        // list than every installed cask.
+        let unlinked = tokens.filter { !$0.hasPrefix(".") && !linked.contains($0) }
+        if !unlinked.isEmpty {
+            let r = Shell.capture(["brew", "info", "--cask", "--json=v2"] + unlinked.sorted())
+            if let data = r.out.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let arr = obj["casks"] as? [[String: Any]] {
+                for c in arr {
+                    guard let token = c["token"] as? String else { continue }
+                    for art in (c["artifacts"] as? [[String: Any]]) ?? [] {
+                        for n in (art["app"] as? [Any]) ?? [] {
+                            if let s = n as? String { result[s] = token }
+                        }
+                        for u in (art["uninstall"] as? [[String: Any]]) ?? [] {
+                            if let one = u["pkgutil"] as? String { brewOwnedPkgIDs[one] = token }
+                            for id in (u["pkgutil"] as? [Any]) ?? [] {
+                                if let s = id as? String { brewOwnedPkgIDs[s] = token }
+                            }
+                            if let one = u["quit"] as? String, !one.contains("*") {
+                                brewOwnedBundleIDs[one] = token
+                            }
+                            for id in (u["quit"] as? [Any]) ?? [] {
+                                if let s = id as? String, !s.contains("*") { brewOwnedBundleIDs[s] = token }
+                            }
+                            for d in (u["delete"] as? [Any]) ?? [] {
+                                if let path = d as? String, path.hasPrefix("/Applications/"),
+                                   path.hasSuffix(".app"), !path.contains("*") {
+                                    result[(path as NSString).lastPathComponent] = token
+                                }
+                            }
                         }
                     }
                 }
@@ -96,6 +145,41 @@ enum Registry {
         }
         return result
     }
+
+    /// Saved cask definitions under a token's .metadata directory.
+    private static func caskJSONs(in metadataDir: String) -> [String] {
+        let fm = FileManager.default
+        var out: [String] = []
+        for version in (try? fm.contentsOfDirectory(atPath: metadataDir)) ?? [] {
+            for stamp in (try? fm.contentsOfDirectory(atPath: "\(metadataDir)/\(version)")) ?? [] {
+                let casks = "\(metadataDir)/\(version)/\(stamp)/Casks"
+                for f in (try? fm.contentsOfDirectory(atPath: casks)) ?? [] where f.hasSuffix(".json") {
+                    out.append("\(casks)/\(f)")
+                }
+            }
+        }
+        return out
+    }
+
+    /// Pull the receipt ids and bundle ids a cask says it owns.
+    private static func harvest(_ path: String, token: String) {
+        guard let data = FileManager.default.contents(atPath: path),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let artifacts = obj["artifacts"] as? [[String: Any]] else { return }
+        for art in artifacts {
+            for u in (art["uninstall"] as? [[String: Any]]) ?? [] {
+                if let one = u["pkgutil"] as? String { brewOwnedPkgIDs[one] = token }
+                for id in (u["pkgutil"] as? [Any]) ?? [] {
+                    if let s = id as? String { brewOwnedPkgIDs[s] = token }
+                }
+                if let one = u["quit"] as? String, !one.contains("*") { brewOwnedBundleIDs[one] = token }
+                for id in (u["quit"] as? [Any]) ?? [] {
+                    if let s = id as? String, !s.contains("*") { brewOwnedBundleIDs[s] = token }
+                }
+            }
+        }
+    }
+
 
     /// "App Name.app" → MAS id, for every Mac App Store app.
     static func masManagedApps() -> [String: String] {
@@ -154,6 +238,10 @@ enum Registry {
         // Asked only of what is still unaccounted for — pkgutil is a process
         // spawn each time.
         for name in installed.subtracting(managed) {
+            if let id = Plist.value("\(appsDir)/\(name)/Contents/Info.plist", "CFBundleIdentifier"),
+               Self.brewOwnedBundleIDs[id] != nil {
+                managed.insert(name); continue
+            }
             if let receipt = Self.packageReceipt(name), Self.brewOwnedPkgIDs[receipt] != nil {
                 managed.insert(name)
             }
