@@ -139,7 +139,14 @@ enum Registry {
         // bundle on disk (e.g. "Amazon Kindle.app"); name-matching alone would
         // then mis-file such apps as "unmanaged". The receipt is authoritative.
         let appStore = installed.filter {
+            // A Mac App Store download carries this receipt...
             fm.fileExists(atPath: "\(appsDir)/\($0)/Contents/_MASReceipt/receipt")
+            // ...and an iPhone/iPad app running on Apple Silicon carries none:
+            // it is a wrapper around the iOS bundle, with the store's metadata
+            // beside it. `mas` doesn't list these either, so without this they
+            // look like unmanaged apps nobody is updating — when in fact the
+            // App Store updates them and we have nothing to offer.
+            || fm.fileExists(atPath: "\(appsDir)/\($0)/Wrapper/iTunesMetadata.plist")
         }
         var managed = Set(brewManaged.keys).union(masManaged.keys).union(appStore)
         // brewManaged only knows apps a cask installs as an .app artifact. A
@@ -174,6 +181,10 @@ enum Registry {
                 entry = RegistryEntry(manager: "sparkle", feed_url: feed)
             } else if fm.fileExists(atPath: "\(appsDir)/\(name)/Contents/Frameworks/Electron Framework.framework") {
                 entry = RegistryEntry(manager: "electron")
+            } else if Plist.value(p, "CFBundleIdentifier") == Bundle.main.bundleIdentifier {
+                // Ourselves. Settings → Maintenance checks GitHub Releases and
+                // can install it; listing it as unattended would be silly.
+                entry = RegistryEntry(manager: "self")
             } else if (Plist.value(p, "CFBundleIdentifier") ?? "").hasPrefix("com.apple.") {
                 // Shipped with macOS. Software Update owns it; it is not an
                 // unmanaged app anyone needs to act on.
@@ -208,6 +219,7 @@ enum Registry {
         let electron = grouped { $0.manager == "electron" }
         let installer = grouped { $0.manager == "installer" }
         let system    = grouped { $0.manager == "system" }
+        let selfMgd   = grouped { $0.manager == "self" }
         let brewable = grouped { $0.brew_cask_available != nil }
         let orphan   = grouped { $0.manager == "unmanaged" && $0.brew_cask_available == nil }
         func list(_ title: String, _ names: [String]) {
@@ -218,6 +230,7 @@ enum Registry {
         list("Electron (self-update on launch):", electron)
         list("Installed by a package — its own installer updates it:", installer)
         list("Shipped with macOS (Software Update owns it):", system)
+        list("UpdateAll itself (Settings → Maintenance):", selfMgd)
         list("Brew cask available (offered below):", brewable)
         list("Unmanaged — no auto-update detected (check manually):", orphan)
 
