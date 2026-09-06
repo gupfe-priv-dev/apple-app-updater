@@ -56,6 +56,10 @@ enum Registry {
 
     /// /Applications/*.app names → cask token, for every installed cask
     /// (reading both `app:` artifacts and uninstall.delete paths).
+    /// pkg receipt id → cask token, for casks that install a package rather
+    /// than an app bundle. Populated by `brewManagedApps()`.
+    static var brewOwnedPkgIDs: [String: String] = [:]
+
     static func brewManagedApps() -> [String: String] {
         let casks = Shell.capture(["brew", "list", "--cask"]).out
             .split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init)
@@ -65,9 +69,20 @@ enum Registry {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let arr = obj["casks"] as? [[String: Any]] else { return [:] }
         var result: [String: String] = [:]
+        brewOwnedPkgIDs = [:]
         for c in arr {
             guard let token = c["token"] as? String else { continue }
             for art in (c["artifacts"] as? [[String: Any]]) ?? [] {
+                // A cask that installs a pkg owns no .app artifact at all — it
+                // declares the receipt it leaves behind instead. PowerShell is
+                // one: brew put it there, and without this it looks like a
+                // vendor installer did.
+                for u in (art["uninstall"] as? [[String: Any]]) ?? [] {
+                    if let one = u["pkgutil"] as? String { brewOwnedPkgIDs[one] = token }
+                    for id in (u["pkgutil"] as? [Any]) ?? [] {
+                        if let s = id as? String { brewOwnedPkgIDs[s] = token }
+                    }
+                }
                 for n in (art["app"] as? [Any]) ?? [] { if let s = n as? String { result[s] = token } }
                 for u in (art["uninstall"] as? [[String: Any]]) ?? [] {
                     for p in (u["delete"] as? [Any]) ?? [] {
@@ -126,7 +141,16 @@ enum Registry {
         let appStore = installed.filter {
             fm.fileExists(atPath: "\(appsDir)/\($0)/Contents/_MASReceipt/receipt")
         }
-        let managed = Set(brewManaged.keys).union(masManaged.keys).union(appStore)
+        var managed = Set(brewManaged.keys).union(masManaged.keys).union(appStore)
+        // brewManaged only knows apps a cask installs as an .app artifact. A
+        // pkg-based cask is found through the receipt it declares instead.
+        // Asked only of what is still unaccounted for — pkgutil is a process
+        // spawn each time.
+        for name in installed.subtracting(managed) {
+            if let receipt = Self.packageReceipt(name), Self.brewOwnedPkgIDs[receipt] != nil {
+                managed.insert(name)
+            }
+        }
         let unmanaged = installed.subtracting(managed)
 
         emit("  \(installed.count) apps in /Applications\n")
@@ -150,7 +174,11 @@ enum Registry {
                 entry = RegistryEntry(manager: "sparkle", feed_url: feed)
             } else if fm.fileExists(atPath: "\(appsDir)/\(name)/Contents/Frameworks/Electron Framework.framework") {
                 entry = RegistryEntry(manager: "electron")
-            } else if Self.installedByPackage(name) {
+            } else if (Plist.value(p, "CFBundleIdentifier") ?? "").hasPrefix("com.apple.") {
+                // Shipped with macOS. Software Update owns it; it is not an
+                // unmanaged app anyone needs to act on.
+                entry = RegistryEntry(manager: "system")
+            } else if Self.packageReceipt(name) != nil {
                 entry = RegistryEntry(manager: "installer")
             } else {
                 entry = RegistryEntry(manager: "unmanaged")
@@ -179,6 +207,7 @@ enum Registry {
         let sparkle  = grouped { $0.manager == "sparkle" }
         let electron = grouped { $0.manager == "electron" }
         let installer = grouped { $0.manager == "installer" }
+        let system    = grouped { $0.manager == "system" }
         let brewable = grouped { $0.brew_cask_available != nil }
         let orphan   = grouped { $0.manager == "unmanaged" && $0.brew_cask_available == nil }
         func list(_ title: String, _ names: [String]) {
@@ -188,6 +217,7 @@ enum Registry {
         list("Sparkle (self-update on launch):", sparkle)
         list("Electron (self-update on launch):", electron)
         list("Installed by a package — its own installer updates it:", installer)
+        list("Shipped with macOS (Software Update owns it):", system)
         list("Brew cask available (offered below):", brewable)
         list("Unmanaged — no auto-update detected (check manually):", orphan)
 
@@ -297,17 +327,20 @@ enum Registry {
     /// Spawning pkgutil per app is not free, so this is only asked where the
     /// answer changes the outcome — an app that is neither brew's, the App
     /// Store's, Sparkle's nor Electron's.
-    static func installedByPackage(_ appName: String) -> Bool {
+    static func packageReceipt(_ appName: String) -> String? {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/sbin/pkgutil")
         task.arguments = ["--file-info", "/Applications/\(appName)"]
         let out = Pipe()
         task.standardOutput = out
         task.standardError = Pipe()
-        guard (try? task.run()) != nil else { return false }
+        guard (try? task.run()) != nil else { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
         let text = String(data: data, encoding: .utf8) ?? ""
-        return text.contains("pkgid:")
+        for line in text.split(separator: "\n") where line.hasPrefix("pkgid:") {
+            return line.dropFirst("pkgid:".count).trimmingCharacters(in: .whitespaces)
+        }
+        return nil
     }
 }
