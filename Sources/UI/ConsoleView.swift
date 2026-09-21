@@ -22,8 +22,12 @@ final class ConsoleView: NSView {
     private var pendingLogLine: String = ""
     private var logHandle: FileHandle?
 
+    /// Any CSI sequence (ESC [ params intermediates final) or OSC string. The
+    /// old pattern accepted only digits and ';' as parameters, so DEC private
+    /// modes — ESC[?25l cursor-hide, ESC[?2026h synchronized output, which brew
+    /// emits on a pty — slipped through and showed up as "[?25l[?2026h" text.
     private static let ansi = try! NSRegularExpression(
-        pattern: "\u{1b}\\[[0-9;]*[mGKHFABCDJsu]")
+        pattern: "\u{1b}\\[[0-?]*[ -/]*[@-~]|\u{1b}\\][^\u{07}\u{1b}]*(\u{07}|\u{1b}\\\\)")
 
     private static let textAttrs: [NSAttributedString.Key: Any] = [
         // labelColor adapts to light/dark so the console reads in both
