@@ -370,15 +370,29 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         table.doubleAction = #selector(updateDoubleClickedRow)
         table.menu = rowMenu()
         table.usesAutomaticRowHeights = false
+        // Spare width goes to the columns flagged autoresizing — Package — not
+        // to whichever column happens to be last. AppKit's default is
+        // last-column-only, which handed every extra pixel to Status and left
+        // it a wide empty band while Package truncated.
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        // Dragged widths survive a relaunch.
+        table.autosaveName = "UpdatesTableColumns"
+        table.autosaveTableColumns = true
 
         for col in Column.allCases {
             let c = NSTableColumn(identifier: .init(col.rawValue))
             c.title = col.title
             c.width = col.width
             c.minWidth = col == .check ? 22 : 60
-            // Package absorbs any extra window width; the rest hold their size,
-            // so a wide window doesn't leave a dead gap mid-row.
-            c.resizingMask = col == .package ? .autoresizingMask : .userResizingMask
+            // Package and Status flex; Manager and Version hold their size.
+            // Two flexible columns rather than one: if only Package could
+            // flex, dragging it narrower left a dead gap after Status with
+            // nothing allowed to fill it. With Status flexible too, a drag on
+            // Package is balanced by Status, and window growth is shared.
+            // Every column keeps .userResizingMask — .autoresizingMask on its
+            // own takes the user's drag handle away.
+            let flexes = col == .package || col == .status
+            c.resizingMask = flexes ? [.autoresizingMask, .userResizingMask] : .userResizingMask
             if col != .check {
                 c.sortDescriptorPrototype = NSSortDescriptor(key: col.rawValue, ascending: true)
             }
