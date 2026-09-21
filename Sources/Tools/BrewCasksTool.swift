@@ -176,6 +176,29 @@ struct BrewCasksTool: Tool {
             }
         }
 
+        // Third opinion, and the one that decides: is it still outdated?
+        //
+        // When the *previous* bundle brew wants to remove is already gone, it
+        // prints "Error: gimp: It seems the App source … is not there", exits
+        // non-zero — and installs the new version regardless. Its exit code
+        // reports the complaint, not the outcome, and the pattern above matches
+        // that very line. GIMP 3.2.6 was on disk and up to date while this app
+        // recorded it as failed and flagged it for next time. A cask brew no
+        // longer lists as outdated was upgraded, whatever it said on the way.
+        if !failed.isEmpty, !ctx.isCancelled {
+            let after = await ctx.capture(["brew", "outdated", "--cask", "--greedy", "--quiet"]).output
+            let stillOutdated = Set(after.split(separator: "\n")
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { Self.isCaskToken($0) })
+            let finished = failed.filter { !stillOutdated.contains($0) }
+            if !finished.isEmpty {
+                failed.removeAll { finished.contains($0) }
+                ctx.line("")
+                ctx.line("ℹ brew complained but the upgrade went through: \(finished.joined(separator: ", "))")
+                ctx.line("  Usually the previous copy was already gone. It's current now.")
+            }
+        }
+
         await handleStuckCasks(in: logText, ctx)
         await stripQuarantine(ctx)
         await cleanup(ctx)
