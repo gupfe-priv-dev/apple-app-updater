@@ -67,14 +67,18 @@ echo "  version: $SHORT_VERSION   (build $BUILD_VERSION)"
 # Build a universal binary so the .app runs on both Intel and Apple Silicon.
 # CI runs on macos-latest (Apple Silicon) and would otherwise ship an arm64-
 # only binary that Intel Macs refuse with "not supported on this Mac".
-# Targeting macOS 11 (Big Sur) keeps NSImage SF Symbol APIs available.
+# Targeting macOS 13 (Ventura). It was 11, but the toolchain that ships the
+# macOS 27 SDK no longer carries x86_64 slices of Swift's back-deployment shims
+# (swiftCompatibility56, swiftCompatibilityConcurrency), which anything older
+# than 12.3 links against — so the Intel half of the universal binary stopped
+# linking. 13 is the first target that builds clean on both arches.
 # All app sources live under Sources/ (recursively — Core/, Tools/, UI/, App/).
 # Compiled together as one module (so main.swift is the single top-level-code
 # file). make-icon.swift is NOT here — it's a standalone script run below.
 SOURCES=( "$DIR"/Sources/**/*.swift(.N) )
-swiftc -target x86_64-apple-macos11 -O -framework AppKit -framework Foundation \
+swiftc -target x86_64-apple-macos13 -O -framework AppKit -framework Foundation \
     -o "$APP/Contents/MacOS/UpdateAll.x86_64" "${SOURCES[@]}"
-swiftc -target arm64-apple-macos11   -O -framework AppKit -framework Foundation \
+swiftc -target arm64-apple-macos13   -O -framework AppKit -framework Foundation \
     -o "$APP/Contents/MacOS/UpdateAll.arm64"  "${SOURCES[@]}"
 lipo -create \
     "$APP/Contents/MacOS/UpdateAll.x86_64" \
