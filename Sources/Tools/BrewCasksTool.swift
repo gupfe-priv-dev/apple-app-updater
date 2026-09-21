@@ -102,7 +102,7 @@ struct BrewCasksTool: Tool {
 
     /// `only` nil → every outdated cask; otherwise the intersection with it.
     private func upgrade(_ ctx: RunContext, only: Set<String>?) async -> InstallOutcome {
-        await restoreDriftedCasks(ctx)
+        await restoreDriftedCasks(ctx, only: only)
         // Quit apps that are about to be replaced while open (updating a running
         // app can leave it glitchy until restart). Relaunched after the upgrade.
         let running = await quitRunningApps(ctx, only: only)
@@ -176,7 +176,17 @@ struct BrewCasksTool: Tool {
             }
         }
 
+        await handleStuckCasks(in: logText, ctx)
+        await stripQuarantine(ctx)
+        await cleanup(ctx)
+        await relaunchApps(relaunch, ctx)
+
         // Third opinion, and the one that decides: is it still outdated?
+        //
+        // Asked here, after handleStuckCasks, on purpose. That step can repair a
+        // cask that failed above — 'Stale install detected → Reinstall now?' —
+        // and asking before it meant a successful recovery was still printed
+        // under 'failed to upgrade' and flagged for next time.
         //
         // When the *previous* bundle brew wants to remove is already gone, it
         // prints "Error: gimp: It seems the App source … is not there", exits
@@ -198,11 +208,6 @@ struct BrewCasksTool: Tool {
                 ctx.line("  Usually the previous copy was already gone. It's current now.")
             }
         }
-
-        await handleStuckCasks(in: logText, ctx)
-        await stripQuarantine(ctx)
-        await cleanup(ctx)
-        await relaunchApps(relaunch, ctx)
 
         // Stopped, not failed. brew dies on SIGINT with a failure status like
         // any other error, so without this the run ends by claiming the cask
@@ -428,9 +433,13 @@ struct BrewCasksTool: Tool {
     /// crash) leaves brew's metadata thinking it's installed but no real
     /// backup to restore. Offer to reinstall those whose apps are ALL missing;
     /// just inform about partials (user likely removed one app from a bundle).
-    private func restoreDriftedCasks(_ ctx: RunContext) async {
+    private func restoreDriftedCasks(_ ctx: RunContext, only: Set<String>? = nil) async {
         var byToken: [String: [String]] = [:]
         for (app, tok) in Registry.brewManagedApps() { byToken[tok, default: []].append(app) }
+        // A targeted run asks only about what the user ticked. Offering to
+        // reinstall two casks when one row was selected is the kind of thing
+        // that makes a prompt feel like it came from somewhere else.
+        if let only { byToken = byToken.filter { only.contains($0.key) } }
         guard !byToken.isEmpty else { return }
 
         var missingTotal: [(token: String, apps: [String])] = []

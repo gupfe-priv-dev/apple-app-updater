@@ -94,12 +94,15 @@ enum Registry {
                 for entry in (try? fm.contentsOfDirectory(atPath: versionDir)) ?? []
                 where entry.hasSuffix(".app") {
                     let staged = "\(versionDir)/\(entry)"
-                    let target = (try? fm.destinationOfSymbolicLink(atPath: staged)) ?? staged
-                    if target.hasPrefix("/Applications/") {
-                        result[(target as NSString).lastPathComponent] = token
-                    } else {
-                        result[entry] = token          // copied, not linked
-                    }
+                    // Only a symlink counts. brew moves the app to /Applications
+                    // and leaves a link back; a real .app still sitting here was
+                    // staged and never installed — Battle.net-Setup.app from an
+                    // `installer manual` cask, which then read as an installed
+                    // app that had gone missing, and was offered for reinstall
+                    // on every single run.
+                    guard let target = try? fm.destinationOfSymbolicLink(atPath: staged),
+                          target.hasPrefix("/Applications/") else { continue }
+                    result[(target as NSString).lastPathComponent] = token
                     linked.insert(token)
                 }
             }
