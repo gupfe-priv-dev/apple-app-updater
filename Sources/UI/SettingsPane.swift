@@ -398,6 +398,12 @@ final class SettingsPane: NSViewController {
                            button: "Manage…", action: #selector(openDeclinedCasks),
                            enabled: declined > 0),
             ]),
+            row("Old Gem Versions:", [
+                statusLine(.neutral, "Accumulate as gems update",
+                           button: "Check…", action: #selector(cleanUpGems)),
+                note("`gem update` keeps the old version so anything pinned to it still works"),
+                note("Removing them can make a pinned Gemfile.lock need `bundle install` again"),
+            ]),
             row("Run Log:", [
                 statusLine(.neutral, "The last four runs",
                            button: "Open", action: #selector(openLog)),
@@ -569,6 +575,49 @@ final class SettingsPane: NSViewController {
     @objc private func clearHistory() {
         History.clearAll()
         rebuild()
+    }
+
+    /// Asks `gem cleanup --dry-run` how many old versions there are, rather
+    /// than counting .gemspec files here. Counting them looked easy and was
+    /// wrong: a platform gem is named nokogiri-1.16.0-arm64-darwin.gemspec, so
+    /// splitting on the last dash invents a distinct gem and undercounts. It
+    /// said 68 where RubyGems said 116. RubyGems owns those rules.
+    ///
+    /// The command is handed over, not run. 100-odd deletions is not something
+    /// to do from a settings pane on someone's behalf, and a Gemfile.lock
+    /// elsewhere may pin a version this would remove.
+    @objc private func cleanUpGems(_ sender: NSButton) {
+        sender.isEnabled = false
+        let previousTitle = sender.title
+        sender.title = "Checking…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let out = Shell.capture(["gem", "cleanup", "--dry-run"]).out
+            let count = out.split(separator: "\n").filter { $0.contains("Would uninstall") }.count
+            DispatchQueue.main.async {
+                sender.isEnabled = true
+                sender.title = previousTitle
+                let alert = NSAlert()
+                if count == 0 {
+                    alert.messageText = "Nothing to clean up"
+                    alert.informativeText = "No superseded gem versions are installed."
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                    return
+                }
+                alert.messageText = "\(count) old gem version\(count == 1 ? "" : "s") installed"
+                alert.informativeText =
+                    "`gem update` keeps the previous version so anything pinned to it still "
+                    + "works, so this is safe to skip.\n\nRemoving them is one command, copied "
+                    + "to your clipboard:\n\n    gem cleanup\n\nA project pinning an older "
+                    + "version will need `bundle install` afterwards."
+                alert.addButton(withTitle: "Copy Command")
+                alert.addButton(withTitle: "Cancel")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString("gem cleanup", forType: .string)
+                }
+            }
+        }
     }
 
     @objc private func openDeclinedCasks() {

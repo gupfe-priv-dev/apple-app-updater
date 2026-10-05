@@ -94,6 +94,49 @@ struct GemTool: Tool {
         return (current, latest)
     }
 
+
+    // MARK: ─ the read-only plugin collision ─────────────────────────────────
+
+    /// Plugin files in the shared gems directory that are symlinks onto
+    /// Homebrew's read-only Cellar.
+    ///
+    /// `gem update <name>` installs the gem, then writes its plugin file. When
+    /// Homebrew's ruby formula has symlinked that path into the Cellar — whose
+    /// files are all r--r--r-- — the write fails and RubyGems reports
+    /// Gem::FilePermissionError, saying it lacks write permission "for the
+    /// … directory". It is not a directory, and the directories involved are
+    /// writable; the permissions that matter are on the symlink's target, which
+    /// is why this looks impossible from the paths in the message.
+    private func unwritablePluginLinks() -> [String] {
+        let fm = FileManager.default
+        guard let gemDirs = try? fm.contentsOfDirectory(atPath: "/opt/homebrew/lib/ruby/gems")
+        else { return [] }
+        var out: [String] = []
+        for v in gemDirs {
+            let plugins = "/opt/homebrew/lib/ruby/gems/\(v)/plugins"
+            for f in (try? fm.contentsOfDirectory(atPath: plugins)) ?? [] {
+                let path = "\(plugins)/\(f)"
+                guard let dest = try? fm.destinationOfSymbolicLink(atPath: path),
+                      dest.contains("/Cellar/"), !fm.isWritableFile(atPath: path) else { continue }
+                out.append(path)
+            }
+        }
+        return out
+    }
+
+    /// Say what actually went wrong, and what clears it.
+    private func explainIfPluginCollision(_ ctx: RunContext) {
+        let links = unwritablePluginLinks()
+        guard !links.isEmpty else { return }
+        ctx.line("")
+        ctx.line("ℹ A plugin file in the shared gems directory is a symlink onto Homebrew's")
+        ctx.line("  Cellar, which is read-only — so RubyGems can install the gem but cannot")
+        ctx.line("  write its plugin, and reports a permission error naming a path you can write:")
+        for l in links { ctx.line("     \(l)") }
+        ctx.line("  Clears it: rm the stale link and update again, or `brew reinstall ruby`.")
+        ctx.line("  Works around it: gem install <name> --user-install")
+    }
+
     func scan(_ ctx: RunContext) async -> ScanResult {
         guard let gem = gemPath() else { return .unavailable }
         let installed = await installedGems(ctx, gem)
@@ -161,6 +204,7 @@ struct GemTool: Tool {
             let status = await ctx.run([gem, "update", "--no-document", item.token])
             if status != 0 { failed.append(item.token) }
         }
+        if !failed.isEmpty { explainIfPluginCollision(ctx) }
         if failed.count == items.count {
             return InstallOutcome(.failed, "gem update failed for: \(failed.joined(separator: ", "))",
                                   failedItems: failed)
@@ -187,6 +231,7 @@ struct GemTool: Tool {
         } else {
             for l in lines { ctx.emit(l + "\n") }
         }
+        if r.status != 0 { explainIfPluginCollision(ctx) }
         return r.status == 0 ? .ok : .failed("gem update exited \(r.status)")
     }
 }
