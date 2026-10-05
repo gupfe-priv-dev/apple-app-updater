@@ -73,13 +73,38 @@ struct GemTool: Tool {
     /// which took ~60s for 85 gems here — nearly all of it waiting on the
     /// network. Listing locally is instant, so we do that and then look the
     /// versions up concurrently, which turns a minute into a couple of seconds.
+
+    // MARK: ─ RubyGems itself ────────────────────────────────────────────────
+
+    /// Token for the row that updates the `gem` command rather than a gem.
+    /// Not a real gem name — `rubygems-update` is, and `gem update <that>`
+    /// installs the package without applying it, which is not what this does.
+    static let systemToken = "__rubygems__"
+
+    /// RubyGems ships as the `rubygems-update` gem, so its registry answers
+    /// "is the manager itself behind?" exactly the way it answers for any
+    /// package. Reading it from the nag line `gem` prints during unrelated
+    /// commands would depend on wording that is not ours.
+    private func rubygemsVersions(_ ctx: RunContext, _ gem: String) async -> (current: String, latest: String)? {
+        let r = await ctx.capture([gem, "--version"])
+        let current = clean(r.output).first?.trimmingCharacters(in: .whitespaces) ?? ""
+        guard !current.isEmpty,
+              let latest = await latestVersion(of: "rubygems-update"),
+              Version.sortV(latest, current) == 1 else { return nil }
+        return (current, latest)
+    }
+
     func scan(_ ctx: RunContext) async -> ScanResult {
         guard let gem = gemPath() else { return .unavailable }
         let installed = await installedGems(ctx, gem)
-        guard !installed.isEmpty else { return .upToDate }
 
         var items: [UpdateItem] = []
         var failures = 0
+        if let v = await rubygemsVersions(ctx, gem) {
+            items.append(UpdateItem("RubyGems (the gem command)", token: Self.systemToken,
+                                    current: v.current, latest: v.latest,
+                                    detail: "gem update --system"))
+        }
         // Bounded concurrency: enough to hide the latency, not so much that we
         // hammer rubygems.org from one machine.
         let batchSize = 12
@@ -103,7 +128,10 @@ struct GemTool: Tool {
         if failures > 0 {
             ctx.line("! couldn't check \(failures) of \(installed.count) gems (network?)")
         }
-        if items.isEmpty && failures == installed.count {
+        // `failures == installed.count` is only evidence of a network problem
+        // when something was actually looked up. With no gems installed at all
+        // it is 0 == 0, which would report a reachable registry as unreachable.
+        if items.isEmpty && !installed.isEmpty && failures == installed.count {
             return .unknown("couldn't reach rubygems.org")
         }
         return .from(items.sorted { $0.name < $1.name })
@@ -117,8 +145,18 @@ struct GemTool: Tool {
         // --system is deliberately not run here: a targeted update shouldn't
         // also bump RubyGems itself behind the user's back.
         var failed: [String] = []
-        for item in items {
+        // RubyGems first when it was picked: it is the thing that performs the
+        // other updates, so updating it afterwards would mean the gems were
+        // installed by the version being replaced.
+        let picked = items.sorted { a, _ in a.token == Self.systemToken }
+        for item in picked {
             ctx.line("")
+            if item.token == Self.systemToken {
+                ctx.line("==> RubyGems itself")
+                let status = await ctx.run([gem, "update", "--system", "--no-document"])
+                if status != 0 { failed.append(item.token) }
+                continue
+            }
             ctx.line("==> \(item.token)")
             let status = await ctx.run([gem, "update", "--no-document", item.token])
             if status != 0 { failed.append(item.token) }
@@ -137,7 +175,11 @@ struct GemTool: Tool {
         // aborts the whole update mid-list — gems after the failure never get
         // updated, even though the one being built installed fine. We don't want
         // ri/rdoc output anyway.
-        _ = await ctx.capture([gem, "update", "--system", "--no-document"])
+        // RubyGems itself is its own row now, so it is updated only when the
+        // user ticked it. It used to be bumped here on every full run with its
+        // output swallowed, which meant a targeted run never updated it and a
+        // full run never showed that it had.
+        _ = ctx
         let r = await ctx.capture([gem, "update", "--no-document"])
         let lines = clean(r.output)
         if lines.isEmpty || lines.contains(where: { $0.contains("Nothing to update") }) {
