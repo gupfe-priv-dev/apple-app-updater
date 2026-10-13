@@ -17,6 +17,8 @@ protocol CoordinatorHost: AnyObject {
     /// (empty when it upgraded everything it had) — the host pairs it with
     /// `outcome.failedItems` to update the failure memory.
     func toolDidEndInstall(_ index: Int, _ outcome: InstallOutcome, items: [UpdateItem])
+    /// Tool `index` started on one item (`ok` nil), or finished it.
+    func itemProgress(_ index: Int, token: String, ok: Bool?)
     /// A tool was passed over without running.
     func toolSkipped(_ index: Int, reason: String)
     /// Ask the user a yes/no question via native UI.
@@ -87,7 +89,7 @@ final class Coordinator {
                 if !ToolAvailability.check(tool) { host.toolSkipped(i, reason: "not installed"); continue }
 
                 host.toolDidBegin(i)
-                let ctx = self.context()
+                let ctx = self.context(toolIndex: i)
                 let outcome: InstallOutcome
                 if tool.supportsTargetedInstall {
                     outcome = await tool.install(ctx, only: items)
@@ -115,7 +117,7 @@ final class Coordinator {
 
     /// A fresh RunContext wired to the host. Tools emit from off-main work, so
     /// the emit closure hops to the main thread for the UI mutation.
-    private func context() -> RunContext {
+    private func context(toolIndex: Int? = nil) -> RunContext {
         RunContext(
             runner: runner,
             emit: { [weak host] s in
@@ -124,7 +126,12 @@ final class Coordinator {
             },
             ask: { [weak host] q in await host?.ask(q) ?? false },
             choose: { [weak host] q, opts in await host?.choose(q, opts) ?? 0 },
-            cancelled: { [weak self] in self?.aborted ?? false })
+            cancelled: { [weak self] in self?.aborted ?? false },
+            progress: { [weak host] token, ok in
+                guard let i = toolIndex else { return }
+                if Thread.isMainThread { host?.itemProgress(i, token: token, ok: ok) }
+                else { DispatchQueue.main.async { host?.itemProgress(i, token: token, ok: ok) } }
+            })
     }
 
     func abort() { aborted = true; runner.interrupt() }

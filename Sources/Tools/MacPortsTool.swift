@@ -49,8 +49,10 @@ struct MacPortsTool: Tool {
         for item in items {
             ctx.line("")
             ctx.line("==> \(item.token)")
+            ctx.itemStarted(item.token)
             let status = await ctx.run(["sudo", "port", "upgrade", item.token])
             if status != 0 { failed.append(item.token) }
+            ctx.itemFinished(item.token, ok: status == 0)
         }
         if failed.count == items.count {
             return InstallOutcome(.failed, "port upgrade failed for: \(failed.joined(separator: ", "))",

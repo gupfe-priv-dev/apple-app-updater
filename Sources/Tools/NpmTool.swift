@@ -68,8 +68,10 @@ struct NpmTool: Tool {
         for item in items {
             ctx.line("")
             ctx.line("==> \(item.token)@latest")
+            ctx.itemStarted(item.token)
             let status = await ctx.run(["npm", "install", "-g", "\(item.token)@latest"])
             if status != 0 { failed.append(item.token) }
+            ctx.itemFinished(item.token, ok: status == 0)
         }
         if failed.count == items.count {
             return InstallOutcome(.failed, "npm install failed for: \(failed.joined(separator: ", "))",

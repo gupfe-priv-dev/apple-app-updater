@@ -721,6 +721,45 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         setHeartbeat(currentMode == .scan
                      ? "Checking \(toolList[index].title)…"
                      : "Updating \(toolList[index].title)…")
+        guard currentMode == .install else { return }
+        // A manager that upgrades everything in one command can't say which
+        // package it's on, so all of its rows are in flight together. One that
+        // goes package by package reports each row as it gets to it.
+        let targetable = toolList[index].supportsTargetedInstall
+        for (i, row) in rows.enumerated()
+        where row.toolIndex == index && row.isSelected && !row.didSucceed {
+            row.status = targetable ? "… queued" : "⟳ updating…"
+            reloadRow(i)
+        }
+    }
+
+    func itemProgress(_ index: Int, token: String, ok: Bool?) {
+        let toolID = toolList[index].id
+        guard let i = rows.firstIndex(where: { $0.toolID == toolID && $0.token == token })
+        else { return }
+        let row = rows[i]
+        switch ok {
+        case nil:
+            row.status = "⟳ updating…"
+            table.scrollRowToVisible(i)
+        case true?:
+            // Provisional — toolDidEndInstall has the final word and records it.
+            row.didSucceed = true
+            row.status = "✓ updated"
+            row.isSelected = false
+        case false?:
+            row.status = "⚠ failed"
+            row.isSelected = false
+        }
+        reloadRow(i)
+        refreshCounts()
+    }
+
+    /// Redraw one row in place. A full reloadData per package would reset the
+    /// table's scroll and flicker every row to show one change.
+    private func reloadRow(_ i: Int) {
+        table.reloadData(forRowIndexes: IndexSet(integer: i),
+                         columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
     }
 
     func appendConsole(_ text: String) {
@@ -809,6 +848,14 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
                 row.status = stopped ? "■ stopped" : (ok ? "✓ updated" : "⚠ failed")
                 row.isSelected = false
             }
+        }
+
+        // Rows marked in flight that the outcome never mentions — a tool that
+        // skipped wholesale, or was asked about items it found nothing to do
+        // for — go back to how they looked rather than claiming work forever.
+        for row in rows where row.toolID == toolID
+            && (row.status == "… queued" || row.status == "⟳ updating…") {
+            row.status = ""
         }
 
         for token in outcome.skippedItems {

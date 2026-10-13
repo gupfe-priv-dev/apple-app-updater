@@ -244,11 +244,14 @@ struct GemTool: Tool {
         // user ends up on, not the one being replaced.
         if let ruby = items.first(where: { $0.token == Self.rubyToken }) {
             rest.removeAll { $0.token == Self.rubyToken }
+            ctx.itemStarted(ruby.token)
             if let old = ruby.current, let new = ruby.latest,
                await upgradeRuby(ctx, from: old, to: new) {
                 gem = gemPath() ?? gem
+                ctx.itemFinished(ruby.token, ok: true)
             } else {
                 failed.append(ruby.token)
+                ctx.itemFinished(ruby.token, ok: false)
             }
         }
         // RubyGems next when it was picked: it is the thing that performs the
@@ -257,15 +260,17 @@ struct GemTool: Tool {
         let picked = rest.sorted { a, _ in a.token == Self.systemToken }
         for item in picked {
             ctx.line("")
+            ctx.itemStarted(item.token)
+            let status: Int32
             if item.token == Self.systemToken {
                 ctx.line("==> RubyGems itself")
-                let status = await ctx.run([gem, "update", "--system", "--no-document"])
-                if status != 0 { failed.append(item.token) }
-                continue
+                status = await ctx.run([gem, "update", "--system", "--no-document"])
+            } else {
+                ctx.line("==> \(item.token)")
+                status = await ctx.run([gem, "update", "--no-document", item.token])
             }
-            ctx.line("==> \(item.token)")
-            let status = await ctx.run([gem, "update", "--no-document", item.token])
             if status != 0 { failed.append(item.token) }
+            ctx.itemFinished(item.token, ok: status == 0)
         }
         if !failed.isEmpty { explainIfPluginCollision(ctx) }
         // Updated gems may bring new executables; under rbenv they are only on

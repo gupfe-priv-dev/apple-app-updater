@@ -90,7 +90,10 @@ struct PipxTool: Tool {
         for item in items {
             ctx.line("")
             ctx.line("==> \(item.token)")
-            if await ctx.run(["pipx", "upgrade", item.token]) != 0 { failed.append(item.token) }
+            ctx.itemStarted(item.token)
+            let ok = await ctx.run(["pipx", "upgrade", item.token]) == 0
+            if !ok { failed.append(item.token) }
+            ctx.itemFinished(item.token, ok: ok)
         }
         if failed.count == items.count {
             return InstallOutcome(.failed, "pipx upgrade failed for: \(failed.joined(separator: ", "))",

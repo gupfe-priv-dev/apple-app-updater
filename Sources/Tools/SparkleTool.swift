@@ -65,6 +65,10 @@ struct SparkleTool: Tool {
             if let only = only, !only.contains(app.name) { continue }
             checked += 1
             let (name, display, feed, installedVer) = (app.name, app.display, app.feed, app.installed)
+            ctx.itemStarted(name)
+            // Every exit below is either a failure recorded in `failed` or a
+            // success; read the verdict once the iteration is over.
+            defer { ctx.itemFinished(name, ok: !failed.contains(name)) }
 
             guard let (latest, url) = await Appcast.fetch(feed) else {
                 ctx.line("✗ \(display): feed unreachable")

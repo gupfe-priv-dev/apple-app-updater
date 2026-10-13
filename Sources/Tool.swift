@@ -8,18 +8,31 @@ final class RunContext {
     private let asker: (String) async -> Bool
     private let chooser: (String, [String]) async -> Int
     private let cancelled: () -> Bool
+    private let progress: (String, Bool?) -> Void
 
     init(runner: ProcessRunner,
          emit: @escaping (String) -> Void,
          ask: @escaping (String) async -> Bool,
          choose: @escaping (String, [String]) async -> Int = { _, _ in 0 },
-         cancelled: @escaping () -> Bool = { false }) {
+         cancelled: @escaping () -> Bool = { false },
+         progress: @escaping (String, Bool?) -> Void = { _, _ in }) {
         self.runner = runner
         self.emitter = emit
         self.asker = ask
         self.chooser = choose
         self.cancelled = cancelled
+        self.progress = progress
     }
+
+    /// The tool has started on the item with this token. Lets the table show
+    /// which row is in flight instead of a whole section sitting unchanged
+    /// until the manager is done with every package.
+    func itemStarted(_ token: String) { progress(token, nil) }
+
+    /// The tool is done with one item. Provisional: the InstallOutcome returned
+    /// at the end is still what's recorded, because a tool may revise its
+    /// verdict afterwards (casks re-check what is still outdated).
+    func itemFinished(_ token: String, ok: Bool) { progress(token, ok) }
 
     /// A question with more than two answers. Returns the index of the chosen
     /// option. Some decisions genuinely have three: yes, no, and not now.

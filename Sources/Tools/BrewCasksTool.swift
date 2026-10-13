@@ -154,6 +154,7 @@ struct BrewCasksTool: Tool {
         for token in tokens {
             ctx.line("")
             ctx.line("==> Upgrading \(token)")
+            ctx.itemStarted(token)
             // pipefail, and bash rather than sh to guarantee it: without it the
             // pipeline's status is tee's, which is always 0, so a cask whose
             // download failed was reported as upgraded. That's how a LibreOffice
@@ -162,6 +163,7 @@ struct BrewCasksTool: Tool {
             let status = await ctx.run(["/bin/bash", "-c", cmd],
                                        env: BrewEnv.download())
             if status != 0 { failed.append(token) }
+            ctx.itemFinished(token, ok: status == 0)
         }
         let logText = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(atPath: log)
