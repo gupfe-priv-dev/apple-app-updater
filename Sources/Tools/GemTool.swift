@@ -1,26 +1,13 @@
 import Foundation
 
-/// Ruby gems via Homebrew's Ruby (Apple's system Ruby is too old). Invoked by
-/// full path so PATH ordering is irrelevant.
+/// Ruby gems, in whichever Ruby the user runs: rbenv's global version when
+/// rbenv manages one, otherwise Homebrew's (Apple's system Ruby is too old).
+/// See RubyEnv. Under rbenv, Ruby itself is a row too.
 struct GemTool: Tool {
     let id = "gem"
     let title = "Ruby gems"
 
-    /// Path to Homebrew Ruby's gem, or nil if not installed.
-    private func gemPath() -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.arguments = ["brew", "--prefix", "ruby"]
-        p.environment = ProcessRunner.baseEnvironment()
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        p.waitUntilExit()
-        let prefix = out.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prefix.isEmpty else { return nil }
-        let gem = prefix + "/bin/gem"
-        return FileManager.default.isExecutableFile(atPath: gem) ? gem : nil
-    }
+    private func gemPath() -> String? { RubyEnv.current()?.gem }
 
     func isAvailable() -> Bool { gemPath() != nil }
 
@@ -95,6 +82,55 @@ struct GemTool: Tool {
     }
 
 
+    // MARK: ─ Ruby itself (rbenv) ──────────────────────────────────────────
+
+    /// Token for the row that moves rbenv's global Ruby to a newer release.
+    static let rubyToken = "__ruby__"
+
+    /// Build the new Ruby, carry the old one's gems over, then make it global.
+    ///
+    /// Gems belong to one Ruby, so a bare `rbenv global` would leave every
+    /// command the user had installed — fastlane, cocoapods — behind in the old
+    /// version, and the new one starts with only what Ruby bundles. They are
+    /// installed fresh (their latest), which is also why the gem rows scanned
+    /// against the old Ruby need nothing more once this has run.
+    ///
+    /// Global is switched last, so a failed build or install leaves the user
+    /// on the Ruby that worked.
+    private func upgradeRuby(_ ctx: RunContext, from old: String, to new: String) async -> Bool {
+        ctx.line("==> Ruby \(old) → \(new) (rbenv) — building from source takes a few minutes")
+        guard await ctx.run(["rbenv", "install", "--skip-existing", new]) == 0,
+              let oldGem = RubyEnv.rbenvGem(old), let newGem = RubyEnv.rbenvGem(new)
+        else { return false }
+
+        let have = Set(await ctx.capture([newGem, "list", "--no-versions"]).output
+            .split(separator: "\n").map(String.init))
+        let missing = clean(await ctx.capture([oldGem, "list", "--no-versions"]).output)
+            .filter { !$0.contains(" ") && !have.contains($0) }
+        if !missing.isEmpty {
+            ctx.line("")
+            ctx.line("==> Reinstalling \(missing.count) gem\(missing.count == 1 ? "" : "s") from Ruby \(old)")
+            // One gem that won't build on the new Ruby shouldn't hold the rest
+            // hostage, but it isn't this tool's call to strand it either.
+            if await ctx.run([newGem, "install", "--no-document"] + missing) != 0,
+               !(await ctx.ask("Some gems didn't install into Ruby \(new) (see the console). Switch to it anyway?")) {
+                ctx.line("Ruby \(old) stays the global version; \(new) is installed alongside")
+                return false
+            }
+        }
+
+        guard await ctx.run(["rbenv", "global", new]) == 0 else { return false }
+        await ctx.run(["rbenv", "rehash"])
+        ctx.line("✓ Ruby \(new) is now rbenv's global version")
+
+        // The old version still works and costs nothing to keep; removing it is
+        // the user's call, and a project's .ruby-version may still name it.
+        if await ctx.ask("Remove the previous Ruby \(old)? A project whose .ruby-version names it would need it reinstalled.") {
+            await ctx.run(["rbenv", "uninstall", "--force", old])
+        }
+        return true
+    }
+
     // MARK: ─ the read-only plugin collision ─────────────────────────────────
 
     /// Plugin files in the shared gems directory that are symlinks onto
@@ -107,13 +143,20 @@ struct GemTool: Tool {
     /// … directory". It is not a directory, and the directories involved are
     /// writable; the permissions that matter are on the symlink's target, which
     /// is why this looks impossible from the paths in the message.
+    /// Only Homebrew's ruby has this layout; an rbenv Ruby owns all its files.
     private func unwritablePluginLinks() -> [String] {
+        guard let env = RubyEnv.current(), env.kind == .homebrew else { return [] }
         let fm = FileManager.default
-        guard let gemDirs = try? fm.contentsOfDirectory(atPath: "/opt/homebrew/lib/ruby/gems")
+        // <brew prefix>/opt/ruby/bin/gem → <brew prefix>/lib/ruby/gems. Not a
+        // fixed /opt/homebrew: an Intel Mac's prefix is /usr/local.
+        let brewPrefix = ((env.gem as NSString).deletingLastPathComponent as NSString)
+            .deletingLastPathComponent.replacingOccurrences(of: "/opt/ruby", with: "")
+        let gemsRoot = "\(brewPrefix)/lib/ruby/gems"
+        guard let gemDirs = try? fm.contentsOfDirectory(atPath: gemsRoot)
         else { return [] }
         var out: [String] = []
         for v in gemDirs {
-            let plugins = "/opt/homebrew/lib/ruby/gems/\(v)/plugins"
+            let plugins = "\(gemsRoot)/\(v)/plugins"
             for f in (try? fm.contentsOfDirectory(atPath: plugins)) ?? [] {
                 let path = "\(plugins)/\(f)"
                 guard let dest = try? fm.destinationOfSymbolicLink(atPath: path),
@@ -138,11 +181,19 @@ struct GemTool: Tool {
     }
 
     func scan(_ ctx: RunContext) async -> ScanResult {
-        guard let gem = gemPath() else { return .unavailable }
+        guard let env = RubyEnv.current() else { return .unavailable }
+        let gem = env.gem
         let installed = await installedGems(ctx, gem)
 
         var items: [UpdateItem] = []
         var failures = 0
+        if case .rbenv(let current) = env.kind,
+           let latest = RubyEnv.latestStableRuby(),
+           Version.sortV(latest, current) == 1 {
+            items.append(UpdateItem("Ruby (rbenv global)", token: Self.rubyToken,
+                                    current: current, latest: latest,
+                                    detail: "rbenv install, move gems, rbenv global"))
+        }
         if let v = await rubygemsVersions(ctx, gem) {
             items.append(UpdateItem("RubyGems (the gem command)", token: Self.systemToken,
                                     current: v.current, latest: v.latest,
@@ -183,15 +234,27 @@ struct GemTool: Tool {
     var supportsTargetedInstall: Bool { true }
 
     func install(_ ctx: RunContext, only items: [UpdateItem]) async -> InstallOutcome {
-        guard let gem = gemPath() else { return .unavailable }
+        guard var gem = gemPath() else { return .unavailable }
         guard !items.isEmpty else { return .skipped("nothing selected") }
         // --system is deliberately not run here: a targeted update shouldn't
         // also bump RubyGems itself behind the user's back.
         var failed: [String] = []
-        // RubyGems first when it was picked: it is the thing that performs the
+        var rest = items
+        // Ruby before everything: the rows after it should land in the Ruby the
+        // user ends up on, not the one being replaced.
+        if let ruby = items.first(where: { $0.token == Self.rubyToken }) {
+            rest.removeAll { $0.token == Self.rubyToken }
+            if let old = ruby.current, let new = ruby.latest,
+               await upgradeRuby(ctx, from: old, to: new) {
+                gem = gemPath() ?? gem
+            } else {
+                failed.append(ruby.token)
+            }
+        }
+        // RubyGems next when it was picked: it is the thing that performs the
         // other updates, so updating it afterwards would mean the gems were
         // installed by the version being replaced.
-        let picked = items.sorted { a, _ in a.token == Self.systemToken }
+        let picked = rest.sorted { a, _ in a.token == Self.systemToken }
         for item in picked {
             ctx.line("")
             if item.token == Self.systemToken {
@@ -205,6 +268,9 @@ struct GemTool: Tool {
             if status != 0 { failed.append(item.token) }
         }
         if !failed.isEmpty { explainIfPluginCollision(ctx) }
+        // Updated gems may bring new executables; under rbenv they are only on
+        // PATH once a shim exists for them.
+        if case .rbenv? = RubyEnv.current()?.kind { _ = await ctx.capture(["rbenv", "rehash"]) }
         if failed.count == items.count {
             return InstallOutcome(.failed, "gem update failed for: \(failed.joined(separator: ", "))",
                                   failedItems: failed)
@@ -232,6 +298,7 @@ struct GemTool: Tool {
             for l in lines { ctx.emit(l + "\n") }
         }
         if r.status != 0 { explainIfPluginCollision(ctx) }
+        if case .rbenv? = RubyEnv.current()?.kind { _ = await ctx.capture(["rbenv", "rehash"]) }
         return r.status == 0 ? .ok : .failed("gem update exited \(r.status)")
     }
 }

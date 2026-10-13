@@ -65,6 +65,7 @@ with their current state:
 | macOS system | `softwareupdate --list` | `softwareupdate --install --all` |
 | npm global packages | `npm outdated -g` | `npm install -g <pkg>@latest` |
 | Ruby gems | `gem list` + RubyGems API | `gem update <name>` |
+| Ruby itself (rbenv) | `rbenv global` vs `rbenv install --list` | `rbenv install`, reinstall gems, `rbenv global` |
 | Rust toolchains | `rustup check` | `rustup update` |
 | pipx packages | `pipx list --json` + PyPI | `pipx upgrade <name>` |
 | Claude Code CLI | `claude --version` + npm registry | `claude update` |
@@ -73,6 +74,13 @@ with their current state:
 Casks are upgraded one command per token rather than in one batch: brew
 prefetches every download first and aborts the whole run if any single one
 fails, so one unreachable host used to take down every other cask.
+
+Gems are updated in the Ruby you actually run: rbenv's global version when
+rbenv manages one, otherwise Homebrew's `ruby`. Under rbenv, a newer stable
+Ruby is its own row — it's built, your gems are reinstalled into it, and only
+then does it become the global version, so a failed build leaves you where you
+were. The previous version is removed only if you say so. New releases appear
+once Homebrew has upgraded `ruby-build`, which knows the list.
 
 Gems are checked by listing locally and querying the RubyGems API
 concurrently. `gem outdated` asks about each gem one at a time — ~60s for 85

@@ -591,7 +591,10 @@ final class SettingsPane: NSViewController {
         let previousTitle = sender.title
         sender.title = "Checking…"
         DispatchQueue.global(qos: .userInitiated).async {
-            let out = Shell.capture(["gem", "cleanup", "--dry-run"]).out
+            // The Ruby the user runs (rbenv's, if any), not whichever `gem`
+            // happens to be first on the app's PATH.
+            let gem = RubyEnv.current()?.gem ?? "gem"
+            let out = Shell.capture([gem, "cleanup", "--dry-run"]).out
             let count = out.split(separator: "\n").filter { $0.contains("Would uninstall") }.count
             DispatchQueue.main.async {
                 sender.isEnabled = true
