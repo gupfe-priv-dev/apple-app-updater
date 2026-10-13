@@ -50,10 +50,21 @@ struct MasTool: Tool {
 
     func install(_ ctx: RunContext, only items: [UpdateItem]) async -> InstallOutcome {
         guard !items.isEmpty else { return .skipped("nothing selected") }
-        // `mas upgrade <id> <id> …` takes the numeric App Store ids.
-        let status = await ctx.run(["mas", "upgrade"] + items.map { $0.token }, env: env)
-        return status == 0 ? .ok
-                           : InstallOutcome(.failed, "mas upgrade exited \(status)",
-                                            failedItems: items.map { $0.token })
+        // One app per command. `mas upgrade <id> <id> …` would take them all at
+        // once, but then a single failed download fails every app it was given,
+        // and nothing can say which one is in progress.
+        var failed: [String] = []
+        for item in items {
+            ctx.line("")
+            ctx.line("==> \(item.name)")
+            ctx.itemStarted(item.token)
+            let status = await ctx.run(["mas", "upgrade", item.token], env: env)
+            if status != 0 { failed.append(item.token) }
+            ctx.itemFinished(item.token, ok: status == 0)
+        }
+        if failed.count == items.count {
+            return InstallOutcome(.failed, "mas upgrade failed for every app", failedItems: failed)
+        }
+        return .partial(failed)
     }
 }

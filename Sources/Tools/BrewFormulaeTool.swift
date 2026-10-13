@@ -56,13 +56,31 @@ struct BrewFormulaeTool: Tool {
         // (e.g. yt-dlp's /usr/local/bin/<name> already exists from another
         // package manager) and auto-repair them with `brew link --overwrite`.
         let log = NSTemporaryDirectory() + "ua-formulae-\(UUID().uuidString).log"
-        let targets = names.map { "'\($0)'" }.joined(separator: " ")
         // pipefail so the pipeline reports brew's status rather than tee's,
         // which is always 0. (The still-outdated re-check below already caught
         // most of this, but the exit code should be true on its own.)
-        let cmd = "set -o pipefail; brew upgrade --formula \(targets) 2>&1 | tee '\(log)'"
-        let status = await ctx.run(["/bin/bash", "-c", cmd],
-                                   env: BrewEnv.download())
+        func upgrade(_ targets: String) async -> Int32 {
+            let cmd = "set -o pipefail; brew upgrade --formula \(targets) 2>&1 | tee -a '\(log)'"
+            return await ctx.run(["/bin/bash", "-c", cmd], env: BrewEnv.download())
+        }
+        // A targeted run goes one formula per command, so the table can follow
+        // along. A formula's outdated dependencies come with it, so one picked
+        // later may already be done by the time it's reached — brew says so and
+        // exits 0. "Everything" stays a single command: there's no row list to
+        // follow, and brew orders that batch better than we would.
+        var status: Int32 = 0
+        if names.isEmpty {
+            status = await upgrade("")
+        } else {
+            for name in names {
+                ctx.line("")
+                ctx.line("==> \(name)")
+                ctx.itemStarted(name)
+                let s = await upgrade("'\(name)'")
+                if s != 0 { status = s }
+                ctx.itemFinished(name, ok: s == 0)
+            }
+        }
         let logText = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(atPath: log)
         await handleLinkConflicts(in: logText, ctx)
@@ -92,7 +110,15 @@ struct BrewFormulaeTool: Tool {
         }
         let real = stillOutdated.filter { !noBottle.contains($0) }
         if real.isEmpty { return .ok }
-        return .failed("brew upgrade exited \(status); still outdated: \(real.joined(separator: ", "))")
+        // Name what failed so only those rows are flagged — the others did
+        // upgrade, and a section-wide failure would taint every one of them.
+        if !names.isEmpty && real.count < names.count {
+            ctx.line("⚠ still outdated: \(real.joined(separator: ", "))")
+            return .partial(real)
+        }
+        return InstallOutcome(.failed,
+                              "brew upgrade exited \(status); still outdated: \(real.joined(separator: ", "))",
+                              failedItems: real)
     }
 
     // MARK: ─ Tier 3 no-bottle detection ─────────────────────────────────────

@@ -40,7 +40,50 @@ struct SoftwareUpdateTool: Tool {
 
     func scan(_ ctx: RunContext) async -> ScanResult {
         let ups = await list(ctx)
-        return .from(ups.map { UpdateItem($0.title) })
+        // The label is what `softwareupdate --install` takes; the title is
+        // what a person recognises.
+        return .from(ups.map {
+            UpdateItem($0.title, token: $0.label,
+                       detail: $0.restart ? "needs a restart — via System Settings" : nil)
+        })
+    }
+
+    var supportsTargetedInstall: Bool { true }
+
+    /// Ticking a row is the consent, so unlike the full run this doesn't ask
+    /// again. Restart updates still go to System Settings: the console can't
+    /// answer their authorization prompt, so they'd hang at "Password:".
+    func install(_ ctx: RunContext, only items: [UpdateItem]) async -> InstallOutcome {
+        guard !items.isEmpty else { return .skipped("nothing selected") }
+        let byLabel = Dictionary(await list(ctx).map { ($0.label, $0) }, uniquingKeysWith: { a, _ in a })
+        var failed: [String] = [], viaSettings: [String] = []
+        for item in items {
+            ctx.line("")
+            guard let u = byLabel[item.token] else {
+                // Installed meanwhile (or withdrawn): nothing left to do.
+                ctx.line("✓ \(item.name) — no longer offered")
+                ctx.itemFinished(item.token, ok: true)
+                continue
+            }
+            if u.restart {
+                ctx.line("ℹ \(u.title) needs System Settings (authorization + restart)")
+                viaSettings.append(item.token)
+                continue
+            }
+            ctx.line("==> \(u.title)")
+            ctx.itemStarted(item.token)
+            let status = await ctx.run(["sudo", "softwareupdate", "--install", "--label", u.label])
+            if status != 0 { failed.append(item.token) }
+            ctx.itemFinished(item.token, ok: status == 0)
+        }
+        if !viaSettings.isEmpty,
+           await ctx.ask("Open Software Update in System Settings now?") {
+            _ = Shell.capture(["open", "x-apple.systempreferences:com.apple.preferences.softwareupdate"])
+        }
+        // Not attempted here, so neither updated nor failed.
+        return InstallOutcome(failed.count == items.count ? .failed : .ok,
+                              failed.isEmpty ? nil : "softwareupdate failed for: \(failed.joined(separator: ", "))",
+                              failedItems: failed, skippedItems: viaSettings)
     }
 
     func install(_ ctx: RunContext) async -> InstallOutcome {
@@ -60,7 +103,9 @@ struct SoftwareUpdateTool: Tool {
             if await ctx.ask("Install \(installable.count) update(s)?") {
                 for u in installable {
                     ctx.line("→ \(u.title)")
-                    _ = await ctx.run(["sudo", "softwareupdate", "--install", "--label", u.label])
+                    ctx.itemStarted(u.label)
+                    let status = await ctx.run(["sudo", "softwareupdate", "--install", "--label", u.label])
+                    ctx.itemFinished(u.label, ok: status == 0)
                 }
             } else {
                 ctx.line("⊘ Skipped non-restart updates")

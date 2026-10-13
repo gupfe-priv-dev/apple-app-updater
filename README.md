@@ -15,9 +15,9 @@ single console:
 ![The updates window](docs/screenshot-updates.png)
 
 - **Check each row individually.** A manager that can target a subset upgrades
-  only what's ticked. One that upgrades everything in a single command (macOS
-  Software Update, pipx, Claude Code) keeps its rows ticked as a group, so the
-  checkbox never promises something the CLI can't honour.
+  only what's ticked. Every manager
+  updates one package per command, and its row turns updated or failed the
+  moment that package is done — not when the whole manager finishes.
 - **Right-click a row** to update just it, clear a failure flag, hide it from
   future scans, disable its manager, or copy its package id.
 - **Failure memory.** A package whose update failed comes back pre-flagged and
@@ -58,15 +58,15 @@ with their current state:
 
 | Source | Check | Apply |
 |--------|-------|-------|
-| Homebrew formulae | `brew outdated --formula` | `brew upgrade --formula [names]` |
+| Homebrew formulae | `brew outdated --formula` | `brew upgrade --formula <name>` |
 | Homebrew casks | `brew outdated --cask --greedy` | `brew upgrade --cask` per token |
 | MacPorts | `port outdated` | `sudo port upgrade [names]` |
 | Mac App Store | `mas outdated` | `mas upgrade <id>` |
-| macOS system | `softwareupdate --list` | `softwareupdate --install --all` |
+| macOS system | `softwareupdate --list` | `softwareupdate --install --label <label>` |
 | npm global packages | `npm outdated -g` | `npm install -g <pkg>@latest` |
 | Ruby gems | `gem list` + RubyGems API | `gem update <name>` |
 | Ruby itself (rbenv) | `rbenv global` vs `rbenv install --list` | `rbenv install`, reinstall gems, `rbenv global` |
-| Rust toolchains | `rustup check` | `rustup update` |
+| Rust toolchains | `rustup check` | `rustup update <toolchain>`, `rustup self update` |
 | pipx packages | `pipx list --json` + PyPI | `pipx upgrade <name>` |
 | Claude Code CLI | `claude --version` + npm registry | `claude update` |
 | Unmanaged apps (Sparkle) | appcast feed per app | downloads & installs DMG/ZIP/PKG |
