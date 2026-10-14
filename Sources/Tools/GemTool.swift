@@ -180,10 +180,58 @@ struct GemTool: Tool {
         ctx.line("  Works around it: gem install <name> --user-install")
     }
 
+
+    // MARK: ─ gems the Ruby install ships ────────────────────────────────────
+
+    /// Gems whose files live inside the Ruby installation itself.
+    ///
+    /// These belong to the Ruby version, not to the user: Homebrew's ruby keeps
+    /// them in the Cellar, an rbenv Ruby under its own version directory. They
+    /// are replaced when Ruby is replaced — brew bumping 4.0.7 to 4.0.7_1 is
+    /// exactly that.
+    ///
+    /// `gem update` cannot replace them; it installs a second copy into the
+    /// shared gems directory that shadows the shipped one. On this machine that
+    /// had happened to 40 of the 41 gems Ruby ships — rake, irb, bundler,
+    /// minitest, rexml and the rest — which is where a 147 MB gems directory and
+    /// 116 superseded versions came from. Only rdoc ever complained, because its
+    /// plugin file force-loads the shipped copy alongside the newer one.
+    private func rubyShippedGems() -> Set<String> {
+        guard let env = RubyEnv.current() else { return [] }
+        // <ruby prefix>/bin/gem → <ruby prefix>/lib/ruby/gems/<abi>/gems
+        let rubyPrefix = ((env.gem as NSString).deletingLastPathComponent as NSString)
+            .deletingLastPathComponent
+        let fm = FileManager.default
+        let root = "\(rubyPrefix)/lib/ruby/gems"
+        var names = Set<String>()
+        for abi in (try? fm.contentsOfDirectory(atPath: root)) ?? [] {
+            for dir in (try? fm.contentsOfDirectory(atPath: "\(root)/\(abi)/gems")) ?? [] {
+                // "rdoc-7.0.4" → "rdoc"; a trailing platform ("-arm64-darwin")
+                // never appears on the gems Ruby ships.
+                if let dash = dir.range(of: "-", options: .backwards) {
+                    names.insert(String(dir[..<dash.lowerBound]))
+                }
+            }
+        }
+        return names
+    }
+
     func scan(_ ctx: RunContext) async -> ScanResult {
         guard let env = RubyEnv.current() else { return .unavailable }
         let gem = env.gem
-        let installed = await installedGems(ctx, gem)
+        var installed = await installedGems(ctx, gem)
+
+        // Leave Ruby's own gems to Ruby. Updating them in place is impossible —
+        // a second copy lands in the shared directory and shadows the shipped
+        // one — so offering them promises something `gem update` cannot do.
+        let shipped = rubyShippedGems()
+        let skipped = installed.filter { shipped.contains($0.name) }.map(\.name).sorted()
+        installed = installed.filter { !shipped.contains($0.name) }
+        if !skipped.isEmpty {
+            ctx.line("– \(skipped.count) gem\(skipped.count == 1 ? "" : "s") ship with this Ruby "
+                     + "and are updated with it: \(skipped.prefix(6).joined(separator: ", "))"
+                     + (skipped.count > 6 ? ", …" : ""))
+        }
 
         var items: [UpdateItem] = []
         var failures = 0
