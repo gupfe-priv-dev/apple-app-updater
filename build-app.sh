@@ -126,8 +126,21 @@ xattr -rc "$APP"
 # grant. A certificate gives a stable designated requirement, so the grant
 # sticks. Set one up in the app: Settings -> System Access -> Code signing.
 CODESIGN_CN="UpdateAll Local Signing"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CODESIGN_CN"; then
-    SIGN_ID="$CODESIGN_CN"
+# CODESIGN_KEYCHAIN lets CI point at a keychain it created for the job; empty
+# locally, where the identity lives in the login keychain.
+_kc=( ${CODESIGN_KEYCHAIN:+"$CODESIGN_KEYCHAIN"} )
+# -v (valid) is required, not optional: codesign refuses an identity whose
+# certificate is not trusted for code signing — it reports "no identity found"
+# even when `find-identity` without -v lists it as (CSSMERR_TP_NOT_TRUSTED).
+# Verified on a throwaway identity this Mac had never seen. Whoever prepares
+# the keychain owns the trust; see the release workflow.
+#
+# Matched on the SHA-1 rather than the name so the keychain argument decides
+# which identity is used when several carry the same common name.
+SIGN_SHA=$(security find-identity -v -p codesigning "${_kc[@]}" 2>/dev/null \
+           | awk -v cn="$CODESIGN_CN" '$0 ~ cn {print $2; exit}')
+if [[ -n "$SIGN_SHA" ]]; then
+    SIGN_ID="$SIGN_SHA"
     STABLE_SIGNATURE=1
     echo "  signing with: $CODESIGN_CN (stable)"
 else
@@ -135,7 +148,8 @@ else
     STABLE_SIGNATURE=0
     echo "  signing with: ad-hoc (App Management will need re-granting after each build)"
 fi
-codesign --sign "$SIGN_ID" --force --deep "$APP"
+codesign --sign "$SIGN_ID" ${CODESIGN_KEYCHAIN:+--keychain "$CODESIGN_KEYCHAIN"} \
+    --force --deep "$APP"
 
 # Copy the signed bundle from the temp build dir into the source tree. Use
 # ditto (not cp) so it doesn't drag along the source dir's FinderInfo; the
