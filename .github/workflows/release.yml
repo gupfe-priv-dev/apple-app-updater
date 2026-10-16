@@ -131,13 +131,26 @@ jobs:
           # -A would let any binary use the key; -T limits it to codesign.
           security import "$RUNNER_TEMP/id.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
             -T /usr/bin/codesign
-          rm -f "$RUNNER_TEMP/id.p12"
+          # A self-signed certificate imports but is not *valid* until it is
+          # trusted for code signing, and `find-identity -v` — which
+          # build-app.sh uses to choose — only counts valid ones. Without this
+          # the import reports "2 identities imported" and the build still signs
+          # ad-hoc. signing-identity.sh does the same thing locally.
+          openssl pkcs12 -in "$RUNNER_TEMP/id.p12" -clcerts -nokeys \
+            -passin "pass:$P12_PASSWORD" -out "$RUNNER_TEMP/cert.pem" -legacy 2>/dev/null \
+            || openssl pkcs12 -in "$RUNNER_TEMP/id.p12" -clcerts -nokeys \
+                 -passin "pass:$P12_PASSWORD" -out "$RUNNER_TEMP/cert.pem" 2>/dev/null
+          security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$RUNNER_TEMP/cert.pem"
+          rm -f "$RUNNER_TEMP/id.p12" "$RUNNER_TEMP/cert.pem"
           # Without this codesign stops for a GUI prompt that no one can answer.
           security set-key-partition-list -S apple-tool:,apple: -s -k "$PASS" "$KEYCHAIN" >/dev/null
           # build-app.sh looks for the identity via find-identity, which searches
           # the keychain list rather than a named keychain.
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
-          security find-identity -v -p codesigning "$KEYCHAIN"
+          # Fail loudly here rather than silently producing an ad-hoc build.
+          security find-identity -v -p codesigning
+          security find-identity -v -p codesigning | grep -q "UpdateAll Local Signing" \
+            || { echo "::error::identity imported but not valid for code signing"; exit 1; }
 
       - name: Build .app
         env:
