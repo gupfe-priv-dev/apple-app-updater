@@ -11,6 +11,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var main: MainWindowController!
     var coordinator: Coordinator!
     private var featuresMenu: NSMenu!
+    private var viewMenu: NSMenu!
 
     var window: NSWindow? { main?.window }
 
@@ -356,6 +357,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
+        // View menu — just the output pane, but it earns a keyboard shortcut:
+        // the pane is where a long run's detail lives and it gets hidden and
+        // shown far more often than anything in Features.
+        let viewItem = NSMenuItem()
+        viewItem.title = "View"
+        menuBar.addItem(viewItem)
+        viewMenu = NSMenu(title: "View")
+        viewMenu.delegate = self
+        viewItem.submenu = viewMenu
+
         // Features menu
         let featuresItem = NSMenuItem()
         featuresItem.title = "Features"
@@ -369,6 +380,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Refresh the Features menu each time it opens so labels reflect state.
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === viewMenu {
+            menu.removeAllItems()
+            let hidden = main.updates.isConsoleHidden
+            let item = menu.addItem(withTitle: hidden ? "Show Output" : "Hide Output",
+                                    action: #selector(UpdatesViewController.toggleConsoleAction),
+                                    keyEquivalent: "o")
+            item.keyEquivalentModifierMask = [.command, .shift]
+            item.target = main.updates
+            return
+        }
         guard menu === featuresMenu else { return }
         menu.removeAllItems()
 

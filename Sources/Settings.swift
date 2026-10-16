@@ -6,6 +6,7 @@ enum Settings {
     private static let disabledKey = "disabledToolIDs"
     private static let excludeKey  = "excludedItems"
     private static let splitKey    = "consoleHeight"
+    private static let consoleHiddenKey = "consoleHidden"
     private static let defaults = UserDefaults.standard
 
     // MARK: tools ────────────────────────────────────────────────────────
@@ -141,6 +142,13 @@ enum Settings {
     }
 
     // MARK: layout ───────────────────────────────────────────────────────
+
+    /// Whether the output pane is collapsed. Separate from its height, so
+    /// hiding it and showing it again restores the size it had.
+    static var consoleHidden: Bool {
+        get { defaults.bool(forKey: consoleHiddenKey) }
+        set { defaults.set(newValue, forKey: consoleHiddenKey) }
+    }
 
     /// Remembered console height so the split doesn't reset every launch.
     static var consoleHeight: CGFloat {

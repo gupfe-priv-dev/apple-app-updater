@@ -66,6 +66,14 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
     /// wins — the heartbeat only fills actual silence.
     private var heartbeat: Timer?
     private var heartbeatLabel = ""
+    private var outputButton: NSButton!
+    /// Says a stop has been asked for, in the status bar rather than only in
+    /// the console — the console can be collapsed, and "did my click land?"
+    /// is exactly the question a stuck run raises.
+    private let stopNotice = NSTextField(labelWithString: "")
+    /// Watches Homebrew's download cache so a long download shows size, rate
+    /// and share done instead of only a rising timer.
+    private let downloads = DownloadWatcher()
     private var heartbeatStart = Date()
     private var lastOutput = Date.distantPast
 
@@ -323,7 +331,45 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         let console = min(Settings.consoleHeight, total - 120)
         split.setPosition(total - console, ofDividerAt: 0)
         didRestoreSplit = true
+        // After didRestoreSplit, so the saved height is in place to come back
+        // to — and so the collapse isn't mistaken for the user dragging.
+        applyConsoleHidden(Settings.consoleHidden)
     }
+
+    // MARK: the output pane ──────────────────────────────────────────────
+
+    @objc func toggleConsoleAction() {
+        applyConsoleHidden(!Settings.consoleHidden)
+    }
+
+    /// Collapse or restore the console. Hiding an arranged subview is how
+    /// NSSplitView collapses a pane; the height to come back to is whatever
+    /// splitViewDidResizeSubviews last recorded.
+    private func applyConsoleHidden(_ hidden: Bool) {
+        Settings.consoleHidden = hidden
+        console.isHidden = hidden
+        if !hidden {
+            let total = split.bounds.height
+            if total > 200 {
+                split.setPosition(total - min(Settings.consoleHeight, total - 120),
+                                  ofDividerAt: 0)
+            }
+        }
+        split.adjustSubviews()
+        refreshOutputButton()
+    }
+
+    private func refreshOutputButton() {
+        let hidden = Settings.consoleHidden
+        outputButton.image = NSImage(
+            systemSymbolName: hidden ? "chevron.up" : "chevron.down",
+            accessibilityDescription: nil)
+        outputButton.toolTip = hidden ? "Show the output pane" : "Hide the output pane"
+    }
+
+    /// Whether the pane is currently collapsed — the menu item asks, so its
+    /// title can say what the command will do.
+    var isConsoleHidden: Bool { Settings.consoleHidden }
 
     /// Installed and Available used to be separate columns with a third,
     /// title-less column holding the arrow between them. That drew its own
@@ -431,6 +477,13 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         countLabel.font = .systemFont(ofSize: 11)
         countLabel.textColor = .secondaryLabelColor
         countLabel.alignment = .right
+
+        stopNotice.font = .systemFont(ofSize: 11, weight: .medium)
+        stopNotice.textColor = .systemOrange
+        stopNotice.isHidden = true
+        // The elapsed time gets truncated before this does: once you've asked
+        // for a stop, whether that landed is the more important of the two.
+        stopNotice.setContentCompressionResistancePriority(.required, for: .horizontal)
 
     }
 
@@ -544,7 +597,19 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.wantsLayer = true
 
-        let stack = NSStackView(views: [spinner, statusLabel, NSView(), countLabel])
+        // A view control, so it lives in the status strip rather than in the
+        // action bar — that bar is for things that act on the selected rows.
+        outputButton = NSButton(title: "Output", target: self,
+                                action: #selector(toggleConsoleAction))
+        outputButton.bezelStyle = .accessoryBarAction
+        outputButton.controlSize = .small
+        outputButton.font = .systemFont(ofSize: 11)
+        outputButton.imagePosition = .imageTrailing
+        outputButton.setContentHuggingPriority(.required, for: .horizontal)
+        outputButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [spinner, statusLabel, stopNotice, NSView(),
+                                        countLabel, outputButton])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 8
@@ -630,12 +695,24 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         guard isBusy else { return }
         coordinator.abort()
         console.writeNote("⚠ Sent SIGINT — waiting for the current task to clean up…")
+        showStopNotice("⚠ Stop sent — finishing the current step…")
         setStatus("Stopping…")
     }
 
     func forceKill() {
         coordinator?.forceKill()
         console.writeNote("⚠ Sent SIGTERM")
+        showStopNotice("⚠ Force quit sent")
+    }
+
+    private func showStopNotice(_ text: String) {
+        stopNotice.stringValue = text
+        stopNotice.isHidden = false
+    }
+
+    private func clearStopNotice() {
+        stopNotice.stringValue = ""
+        stopNotice.isHidden = true
     }
 
     // MARK: row context menu ─────────────────────────────────────────────
@@ -764,6 +841,7 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
 
     func appendConsole(_ text: String) {
         lastOutput = Date()
+        downloads.noteOutput(text)
         console.append(text)
     }
 
@@ -998,6 +1076,8 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
     }
 
     private func startHeartbeat() {
+        clearStopNotice()        // a new run starts without last run's warning
+        downloads.reset()
         heartbeat?.invalidate()
         heartbeat = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tickHeartbeat() }
@@ -1005,6 +1085,7 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
     }
 
     private func stopHeartbeat() {
+        downloads.reset()
         heartbeat?.invalidate()
         heartbeat = nil
         heartbeatLabel = ""
@@ -1018,6 +1099,14 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
 
     private func tickHeartbeat() {
         guard !heartbeatLabel.isEmpty else { return }
+        // A download in flight is better news than either the timer or the
+        // silence rule, and it ignores both: curl redraws its progress bar
+        // constantly, so "is it quiet?" would never be true during the one
+        // stretch of a run where progress is what you want to see.
+        if let d = downloads.sample() {
+            setStatus(DownloadWatcher.statusLine(d))
+            return
+        }
         // Real streamed output wins; only fill actual silence.
         guard Date().timeIntervalSince(lastOutput) > 2 else { return }
         let t = Int(Date().timeIntervalSince(heartbeatStart))
@@ -1245,8 +1334,11 @@ extension UpdatesViewController: NSSplitViewDelegate {
     }
 
     func splitViewDidResizeSubviews(_ notification: Notification) {
-        // Only once the restore has happened — see didRestoreSplit.
-        guard didRestoreSplit, split.bounds.height > 0, console.bounds.height > 0 else { return }
+        // Only once the restore has happened — see didRestoreSplit. And never
+        // while collapsed: that would save a zero height and the pane would
+        // come back as a sliver.
+        guard didRestoreSplit, !Settings.consoleHidden,
+              split.bounds.height > 0, console.bounds.height > 0 else { return }
         Settings.consoleHeight = console.bounds.height
     }
 }
