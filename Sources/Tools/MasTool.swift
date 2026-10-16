@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 /// Mac App Store via `mas`. scan: `mas outdated`. install: `mas upgrade`.
 struct MasTool: Tool {
@@ -183,8 +184,20 @@ struct MasTool: Tool {
         }
         if !deferred.isEmpty {
             ctx.line("")
-            ctx.line("  Open the App Store's Updates tab for: "
-                     + items.filter { deferred.contains($0.token) }.map(\.name).joined(separator: ", "))
+            let names = items.filter { deferred.contains($0.token) }
+                             .map(\.name).joined(separator: ", ")
+            ctx.line("  Only the App Store itself can update: \(names)")
+            // These are the one case where we know exactly where the user has
+            // to go next, so offer to take them there instead of leaving a
+            // line in the console that scrolls away. Not offered for stalled
+            // apps below: the App Store can't update those either yet.
+            if await ctx.ask("The App Store has to update \(names). "
+                             + "Open its Updates tab now?") {
+                await MainActor.run {
+                    NSWorkspace.shared.open(URL(string: "macappstore://showUpdatesPage")!)
+                }
+                ctx.line("  → opened the App Store's Updates tab")
+            }
         }
         if !stalled.isEmpty {
             ctx.line("")
