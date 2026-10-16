@@ -68,10 +68,21 @@ struct MasTool: Tool {
         guard !ids.isEmpty else { return [:] }
         var out: [String: String] = [:]
         let region = (Locale.current.region?.identifier ?? "US").lowercased()
+        // The lookup API is served from a CDN that caches per URL, and the
+        // cached copy can be months stale: TEAMPUNKT returned 2.10.0 from June
+        // while the App Store was offering 2.10.1 released that morning. The
+        // same request with a unique parameter returns the current version
+        // every time, so vary the URL per call. Measured: plain stayed stale
+        // across repeated calls, busted was always fresh, and apps that were
+        // already correct answered identically.
+        let nonce = "\(Int(Date().timeIntervalSince1970))\(Int.random(in: 1000...9999))"
         guard let url = URL(string:
-            "https://itunes.apple.com/lookup?id=\(ids.joined(separator: ","))&country=\(region)&limit=200")
+            "https://itunes.apple.com/lookup?id=\(ids.joined(separator: ","))"
+            + "&country=\(region)&limit=200&_=\(nonce)")
         else { return [:] }
         var req = URLRequest(url: url); req.timeoutInterval = 20
+        // …and don't let URLSession serve its own cached copy either.
+        req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         let data: Data? = await withCheckedContinuation { cont in
             URLSession.shared.dataTask(with: req) { d, _, _ in cont.resume(returning: d) }.resume()
         }
