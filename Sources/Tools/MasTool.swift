@@ -163,6 +163,7 @@ struct MasTool: Tool {
         var failed: [String] = []
         var deferred: [String] = []
         var stalled: [String] = []
+        var statuses: [String: String] = [:]
         for item in items {
             ctx.line("")
             ctx.line("==> \(item.name)")
@@ -173,6 +174,7 @@ struct MasTool: Tool {
             if item.token.hasPrefix(Self.iOSPrefix) {
                 ctx.line("   ⊘ iPhone app — the App Store has to update this one")
                 deferred.append(item.token)
+                statuses[item.token] = "↗ managed in App Store"
                 continue
             }
             ctx.itemStarted(item.token)
@@ -187,6 +189,7 @@ struct MasTool: Tool {
             if status == 0, let before, let after, before == after {
                 ctx.line("   ⊘ the store delivered \(after) again — not yet available for this Mac")
                 stalled.append(item.token)
+                statuses[item.token] = "◷ not offered yet"
                 ctx.itemFinished(item.token, ok: false)
                 continue
             }
@@ -218,8 +221,10 @@ struct MasTool: Tool {
         let attempted = items.count - deferred.count
         if attempted > 0 && failed.count == attempted {
             return InstallOutcome(.failed, "mas upgrade failed for every app it could update",
-                                  failedItems: failed, skippedItems: deferred)
+                                  failedItems: failed, skippedItems: deferred,
+                                  itemStatuses: statuses)
         }
-        return InstallOutcome(.ok, nil, failedItems: failed, skippedItems: deferred + stalled)
+        return InstallOutcome(.ok, nil, failedItems: failed,
+                              skippedItems: deferred + stalled, itemStatuses: statuses)
     }
 }

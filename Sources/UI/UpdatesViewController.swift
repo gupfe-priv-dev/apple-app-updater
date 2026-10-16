@@ -939,7 +939,7 @@ final class UpdatesViewController: NSViewController, CoordinatorHost {
         for token in outcome.skippedItems {
             if let row = rows.first(where: { $0.toolID == toolID && $0.token == token }) {
                 row.didSucceed = false
-                row.status = "⊘ skipped"
+                row.status = outcome.itemStatuses[token] ?? "⊘ skipped"
                 row.isSelected = false
             }
         }

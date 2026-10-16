@@ -68,11 +68,18 @@ struct InstallOutcome {
     /// were never attempted, so they must not be recorded either way — and
     /// certainly not reported as updated.
     var skippedItems: [String]
+    /// What to show in the Status column for a token, when "skipped" would be
+    /// wrong. An iPhone app wasn't skipped — the App Store is the only thing
+    /// that can update it — and saying "skipped" reads as though the app chose
+    /// not to bother.
+    var itemStatuses: [String: String]
 
     init(_ state: State, _ message: String? = nil,
-         failedItems: [String] = [], skippedItems: [String] = []) {
+         failedItems: [String] = [], skippedItems: [String] = [],
+         itemStatuses: [String: String] = [:]) {
         self.state = state; self.message = message
         self.failedItems = failedItems; self.skippedItems = skippedItems
+        self.itemStatuses = itemStatuses
     }
 
     static let ok          = InstallOutcome(.ok)
