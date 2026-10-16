@@ -11,14 +11,47 @@ import AppKit
 ///
 /// Commands are launched through /usr/bin/env so argv[0] is PATH-resolved
 /// (tools pass ["brew", "outdated"], not absolute paths).
-/// @unchecked Sendable: only one subprocess runs at a time and `current` is
-/// touched on the single background queue we dispatch to, so the cross-actor
-/// captures the compiler flags are safe in practice.
+/// @unchecked Sendable: `live` is the only shared state and every touch of it
+/// is under `lock`.
+///
+/// Tools *do* run captures concurrently — the Mac App Store scan asks about
+/// every purchased app at once — so this must be safe for several processes at
+/// a time. It was not: `capture` used to block a worker thread in
+/// `waitUntilExit()`, and with more than one Process alive Foundation
+/// intermittently loses the termination message, leaving that thread parked in
+/// its run loop forever. The scan then sat at "Checking Mac App Store…" with
+/// no child process left to kill, so Stop and Force Quit had nothing to act
+/// on. Now nothing waits: the pipe is drained as it fills and the result is
+/// delivered from the termination handler.
 final class ProcessRunner: @unchecked Sendable {
 
-    /// The process currently running (only one at a time). Exposed so the
-    /// coordinator can wire the Abort button to interrupt()/terminate().
-    private(set) var current: Process?
+    /// Every process this runner has started and not yet reaped. Stop and
+    /// Force Quit act on all of them, which matters when a scan has several
+    /// in flight.
+    private var live: [Process] = []
+    private let lock = NSLock()
+
+    private func remember(_ p: Process) {
+        lock.lock(); live.append(p); lock.unlock()
+    }
+    private func forget(_ p: Process) {
+        lock.lock(); live.removeAll { $0 === p }; lock.unlock()
+    }
+    private var liveProcesses: [Process] {
+        lock.lock(); defer { lock.unlock() }; return live
+    }
+
+    /// Output collected off two queues (the read handler and the termination
+    /// handler), so it needs a lock of its own.
+    private final class Collected: @unchecked Sendable {
+        private var data = Data()
+        private let lock = NSLock()
+        func append(_ d: Data) { lock.lock(); data.append(d); lock.unlock() }
+        var text: String {
+            lock.lock(); defer { lock.unlock() }
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+    }
 
     /// Shared environment: a PATH that includes Homebrew + ~/.local/bin, plus
     /// the brew-quieting vars the old shell scripts exported.
@@ -38,6 +71,11 @@ final class ProcessRunner: @unchecked Sendable {
     struct CaptureResult { let status: Int32; let output: String }
 
     /// Run argv with a clean pipe; return exit status + combined stdout/stderr.
+    ///
+    /// Safe to call concurrently: no thread is blocked waiting, so a lost
+    /// termination message can't wedge one, and the pipe is drained as output
+    /// arrives rather than after the fact — a child that outgrows the pipe
+    /// buffer would otherwise block on write while we waited for it to exit.
     func capture(_ argv: [String], env: [String: String]? = nil) async -> CaptureResult {
         await withCheckedContinuation { (cont: CheckedContinuation<CaptureResult, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -48,18 +86,36 @@ final class ProcessRunner: @unchecked Sendable {
                 let pipe = Pipe()
                 p.standardOutput = pipe
                 p.standardError = pipe
+
+                let collected = Collected()
+                let reader = pipe.fileHandleForReading
+                reader.readabilityHandler = { h in
+                    let d = h.availableData
+                    guard !d.isEmpty else { return }
+                    collected.append(d)
+                }
+                p.terminationHandler = { proc in
+                    reader.readabilityHandler = nil
+                    // Whatever arrived between the last read and exit.
+                    if let rest = try? reader.readToEnd(), !rest.isEmpty {
+                        collected.append(rest)
+                    }
+                    try? reader.close()
+                    self.forget(proc)
+                    cont.resume(returning: CaptureResult(status: proc.terminationStatus,
+                                                         output: collected.text))
+                }
+
+                // Registered before run(), so a process that exits immediately
+                // is already known to the handler that removes it.
+                self.remember(p)
                 do { try p.run() }
                 catch {
+                    self.forget(p)
+                    p.terminationHandler = nil
+                    reader.readabilityHandler = nil
                     cont.resume(returning: CaptureResult(status: -1, output: "\(error)"))
-                    return
                 }
-                self.current = p
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                self.current = nil
-                cont.resume(returning: CaptureResult(
-                    status: p.terminationStatus,
-                    output: String(data: data, encoding: .utf8) ?? ""))
             }
         }
     }
@@ -93,16 +149,19 @@ final class ProcessRunner: @unchecked Sendable {
                 }
                 p.terminationHandler = { proc in
                     pipe.fileHandleForReading.readabilityHandler = nil
-                    self.current = nil
+                    self.forget(proc)
                     cont.resume(returning: proc.terminationStatus)
                 }
-                do { try p.run(); self.current = p }
-                catch { cont.resume(returning: -1) }
+                self.remember(p)
+                do { try p.run() }
+                catch { self.forget(p); cont.resume(returning: -1) }
             }
         }
     }
 
-    func interrupt() { current?.interrupt() }   // SIGINT
-    func terminate() { current?.terminate() }   // SIGTERM
-    var isRunning: Bool { current?.isRunning == true }
+    // Both act on every live child: a scan can have several going at once,
+    // and signalling only the newest would leave the others running.
+    func interrupt() { liveProcesses.forEach { $0.interrupt() } }   // SIGINT
+    func terminate() { liveProcesses.forEach { $0.terminate() } }   // SIGTERM
+    var isRunning: Bool { liveProcesses.contains { $0.isRunning } }
 }
