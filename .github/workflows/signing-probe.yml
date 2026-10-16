@@ -1,0 +1,46 @@
+name: Signing probe
+
+# Diagnostic only: imports the signing identity and reports what the runner
+# makes of it. No build, no release — a full release run costs ten times a
+# Linux minute and three of them were spent discovering one wrong flag.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 6
+    steps:
+      - name: Probe
+        env:
+          P12: ${{ secrets.SIGNING_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+        run: |
+          set -x
+          KEYCHAIN="$RUNNER_TEMP/probe.keychain-db"
+          PASS=$(openssl rand -base64 24)
+          security create-keychain -p "$PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASS" "$KEYCHAIN"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/id.p12"
+          security import "$RUNNER_TEMP/id.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          openssl pkcs12 -in "$RUNNER_TEMP/id.p12" -clcerts -nokeys \
+            -passin "pass:$P12_PASSWORD" -out "$RUNNER_TEMP/cert.pem" -legacy 2>/dev/null \
+            || openssl pkcs12 -in "$RUNNER_TEMP/id.p12" -clcerts -nokeys \
+                 -passin "pass:$P12_PASSWORD" -out "$RUNNER_TEMP/cert.pem"
+          echo "--- cert extracted? ---"
+          ls -l "$RUNNER_TEMP/cert.pem"; openssl x509 -in "$RUNNER_TEMP/cert.pem" -noout -subject -ext extendedKeyUsage
+          echo "--- add-trusted-cert (admin domain) ---"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem" && echo "exit=0" || echo "exit=$?"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASS" "$KEYCHAIN" >/dev/null || true
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          echo "--- identities ---"
+          security find-identity -p codesigning   | sed 's/^/ALL  /'
+          security find-identity -v -p codesigning | sed 's/^/VALID/'
+          echo "--- can codesign actually sign? ---"
+          cp /bin/echo "$RUNNER_TEMP/victim"
+          SHA=$(security find-identity -p codesigning | awk '/UpdateAll Local Signing/{print $2; exit}')
+          echo "sha=$SHA"
+          codesign --force --sign "$SHA" "$RUNNER_TEMP/victim" && echo "SIGNED OK" || echo "SIGN FAILED"
+          codesign -d -r- "$RUNNER_TEMP/victim" 2>&1 | grep designated || true
