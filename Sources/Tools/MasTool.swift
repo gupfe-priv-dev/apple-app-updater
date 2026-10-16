@@ -125,6 +125,13 @@ struct MasTool: Tool {
         return .from(items.sorted { $0.name < $1.name })
     }
 
+
+    /// What `mas list` currently reports for one app, to tell a real upgrade
+    /// from one that re-downloaded the same build.
+    private func installedVersion(_ ctx: RunContext, _ id: String) async -> String? {
+        await masApps(ctx).first { $0.id == id }?.version
+    }
+
     static let iOSPrefix = "ios:"
 
     var supportsTargetedInstall: Bool { true }
@@ -143,6 +150,7 @@ struct MasTool: Tool {
         // and nothing can say which one is in progress.
         var failed: [String] = []
         var deferred: [String] = []
+        var stalled: [String] = []
         for item in items {
             ctx.line("")
             ctx.line("==> \(item.name)")
@@ -156,7 +164,20 @@ struct MasTool: Tool {
                 continue
             }
             ctx.itemStarted(item.token)
+            let before = await installedVersion(ctx, item.token)
             let status = await ctx.run(["mas", "upgrade", item.token], env: env)
+            let after = await installedVersion(ctx, item.token)
+            // A "ghost" update: the iTunes API advertises a version the App
+            // Store back end will not actually hand over for this Mac yet, so
+            // the upgrade exits cleanly having re-downloaded what was already
+            // installed. Reporting that as updated would park the app in the
+            // list for good, offered on every scan and never changing.
+            if status == 0, let before, let after, before == after {
+                ctx.line("   ⊘ the store delivered \(after) again — not yet available for this Mac")
+                stalled.append(item.token)
+                ctx.itemFinished(item.token, ok: false)
+                continue
+            }
             if status != 0 { failed.append(item.token) }
             ctx.itemFinished(item.token, ok: status == 0)
         }
@@ -165,11 +186,16 @@ struct MasTool: Tool {
             ctx.line("  Open the App Store's Updates tab for: "
                      + items.filter { deferred.contains($0.token) }.map(\.name).joined(separator: ", "))
         }
+        if !stalled.isEmpty {
+            ctx.line("")
+            ctx.line("  Advertised but not delivered: \(stalled.count) app\(stalled.count == 1 ? "" : "s"). "
+                     + "The App Store will offer it when it is ready for this Mac.")
+        }
         let attempted = items.count - deferred.count
         if attempted > 0 && failed.count == attempted {
             return InstallOutcome(.failed, "mas upgrade failed for every app it could update",
                                   failedItems: failed, skippedItems: deferred)
         }
-        return InstallOutcome(.ok, nil, failedItems: failed, skippedItems: deferred)
+        return InstallOutcome(.ok, nil, failedItems: failed, skippedItems: deferred + stalled)
     }
 }
