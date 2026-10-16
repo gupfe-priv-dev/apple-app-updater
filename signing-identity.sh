@@ -54,6 +54,47 @@ install_pair() {  # $1 = key.pem  $2 = cert.pem
   rm -rf "$_t"
 }
 
+# Split a multi-identity PKCS#12 and write out just the key and certificate
+# belonging to $CN, as "$3/key.pem" and "$3/cert.pem".
+#
+# `security export -t identities` exports *every* identity in the keychain and
+# has no way to select one, so the p12 this script produces can carry unrelated
+# keys. `openssl pkcs12 -clcerts`/`-nocerts` then emit all of them and taking
+# the first is a coin flip: it shipped a CN=localhost certificate to CI, which
+# trusted that one, found no valid UpdateAll identity, and signed three
+# releases ad-hoc while reporting success. So match the certificate by name,
+# then pair it with the key that actually belongs to it rather than assuming
+# the orders line up.
+split_identity() {  # $1 = p12  $2 = password  $3 = output dir
+  local _t; _t=$(mktemp -d)
+  mkdir -p "$3"
+  _pk12() { openssl pkcs12 -in "$1" -passin "pass:$2" "$@[3,-1]" -legacy 2>/dev/null \
+            || openssl pkcs12 -in "$1" -passin "pass:$2" "$@[3,-1]" 2>/dev/null; }
+  _pk12 "$1" "$2" -clcerts -nokeys  > "$_t/certs.pem"
+  _pk12 "$1" "$2" -nocerts  -nodes  > "$_t/keys.pem"
+
+  # Each -----BEGIN block into a file of its own.
+  awk -v d="$_t" 'BEGIN{n=0} /BEGIN CERTIFICATE/{n++; f=d"/cert"n".pem"} n>0{print > f}' "$_t/certs.pem"
+  awk -v d="$_t" 'BEGIN{n=0} /BEGIN .*PRIVATE KEY/{n++; f=d"/key"n".pem"} n>0{print > f}' "$_t/keys.pem"
+
+  local c=""
+  for f in "$_t"/cert*.pem; do
+    if openssl x509 -in "$f" -noout -subject 2>/dev/null | grep -q "CN *= *$CN"; then c="$f"; break; fi
+  done
+  [[ -n "$c" ]] || { echo "No certificate named '$CN' in that backup." >&2; rm -rf "$_t"; return 1; }
+
+  # Pair by public key: the only reliable link between the two lists.
+  local want; want=$(openssl x509 -in "$c" -pubkey -noout 2>/dev/null)
+  local k=""
+  for f in "$_t"/key*.pem; do
+    if [[ "$(openssl pkey -in "$f" -pubout 2>/dev/null)" == "$want" ]]; then k="$f"; break; fi
+  done
+  [[ -n "$k" ]] || { echo "Found the '$CN' certificate but not its private key." >&2; rm -rf "$_t"; return 1; }
+
+  cp "$c" "$3/cert.pem"; cp "$k" "$3/key.pem"; chmod 600 "$3/key.pem"
+  rm -rf "$_t"
+}
+
 # Refuse to write key material anywhere inside a git working tree. .gitignore
 # covers the obvious names, but the only reliable rule is "not in the repo" —
 # a private key that reaches a public repo lets anyone sign code macOS will
@@ -105,19 +146,19 @@ case "${1:-}" in
 
   export)
     have_identity || { echo "No identity named '$CN'. Run: $0 create" >&2; exit 1; }
-    # `security export` can't select one identity by name, so refuse rather
-    # than quietly bundling up unrelated keys.
-    _count=$(security find-identity -v -p codesigning 2>/dev/null | grep -c ')' || true)
-    if [[ "$_count" -gt 1 ]]; then
-      echo "$_count code-signing identities present and 'security export' can't pick one by name." >&2
-      echo "Export '$CN' from Keychain Access, then: base64 -i <file.p12>" >&2
-      exit 1
-    fi
+    # Other code-signing identities in the keychain are fine: the backup is
+    # narrowed to '$CN' below rather than carrying whatever else is there.
     [[ -n "${2:-}" ]] && refuse_if_in_repo "$2"
     read_password 'Password to encrypt the backup: '
     _t=$(mktemp -d); trap 'rm -rf "$_t"' EXIT
     # macOS asks permission to read the private key here — expected.
-    security export -k "$LOGIN_KEYCHAIN" -t identities -f pkcs12 -P "$PW" -o "$_t/id.p12"
+    _xp=$(openssl rand -hex 24)
+    security export -k "$LOGIN_KEYCHAIN" -t identities -f pkcs12 -P "$_xp" -o "$_t/all.p12"
+    split_identity "$_t/all.p12" "$_xp" "$_t/one"
+    # Rebuild a p12 holding this identity alone, under the user's password.
+    openssl pkcs12 -export -out "$_t/id.p12" -inkey "$_t/one/key.pem" -in "$_t/one/cert.pem" \
+      -passout "pass:$PW" -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 2>/dev/null
+    echo "Backing up: $(openssl x509 -in "$_t/one/cert.pem" -noout -subject)" >&2
     if [[ -n "${2:-}" ]]; then
       base64 -i "$_t/id.p12" > "$2"; chmod 600 "$2"
       echo "Wrote $(wc -c <"$2" | tr -d ' ') bytes to $2 — store it with its password, then delete the file." >&2
@@ -131,10 +172,10 @@ case "${1:-}" in
     if [[ -n "${2:-}" ]]; then base64 -d -i "$2" > "$_t/id.p12"
     else echo "Paste the base64, then Ctrl-D:" >&2; base64 -d > "$_t/id.p12"; fi
     read_password 'Password the backup was encrypted with: '
-    security import "$_t/id.p12" -k "$LOGIN_KEYCHAIN" -P "$PW" -A -T /usr/bin/codesign
-    openssl pkcs12 -in "$_t/id.p12" -clcerts -nokeys -passin "pass:$PW" -out "$_t/cert.pem" -legacy 2>/dev/null \
-      || openssl pkcs12 -in "$_t/id.p12" -clcerts -nokeys -passin "pass:$PW" -out "$_t/cert.pem" 2>/dev/null
-    security add-trusted-cert -r trustRoot -p codeSign -k "$LOGIN_KEYCHAIN" "$_t/cert.pem"
+    # Older backups may hold several identities; install only ours, so the
+    # trust mark lands on the right certificate.
+    split_identity "$_t/id.p12" "$PW" "$_t/one"
+    install_pair "$_t/one/key.pem" "$_t/one/cert.pem"
     echo "Imported:"; security find-identity -v -p codesigning
     ;;
 
@@ -146,11 +187,7 @@ case "${1:-}" in
     mkdir -p "$DIR"
     _t=$(mktemp -d); trap 'rm -rf "$_t"' EXIT
     security export -k "$LOGIN_KEYCHAIN" -t identities -f pkcs12 -P "$PW" -o "$_t/id.p12"
-    openssl pkcs12 -in "$_t/id.p12" -nocerts -nodes -passin "pass:$PW" -out "$DIR/key.pem" -legacy 2>/dev/null \
-      || openssl pkcs12 -in "$_t/id.p12" -nocerts -nodes -passin "pass:$PW" -out "$DIR/key.pem" 2>/dev/null
-    openssl pkcs12 -in "$_t/id.p12" -clcerts -nokeys -passin "pass:$PW" -out "$DIR/cert.pem" -legacy 2>/dev/null \
-      || openssl pkcs12 -in "$_t/id.p12" -clcerts -nokeys -passin "pass:$PW" -out "$DIR/cert.pem" 2>/dev/null
-    chmod 600 "$DIR/key.pem"
+    split_identity "$_t/id.p12" "$PW" "$DIR"
     echo "Wrote $DIR/key.pem and $DIR/cert.pem — key.pem is unencrypted, keep it safe." >&2
     ;;
 
