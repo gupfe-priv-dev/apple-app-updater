@@ -103,6 +103,42 @@ jobs:
           fi
           echo "--- generated notes ---"; cat /tmp/notes.md
 
+      - name: Import the signing identity
+        # Without this the runner signs ad-hoc, and an ad-hoc signature
+        # identifies the app by its code hash — which changes every build. macOS
+        # ties the App Management grant to the designated requirement, so every
+        # released build looked like a different app and the user had to grant
+        # it again after each self-update. The certificate makes the requirement
+        # constant, matching what a local build produces.
+        #
+        # Skipped rather than failed when the secret is absent, so a fork or a
+        # repo without the secret still produces a working (ad-hoc) build.
+        env:
+          P12: ${{ secrets.SIGNING_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+        run: |
+          if [[ -z "$P12" ]]; then
+            echo "::notice::No signing secret — this build will be ad-hoc signed."
+            exit 0
+          fi
+          # A keychain of its own, deleted with the runner. Never the login one.
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          PASS=$(openssl rand -base64 24)
+          security create-keychain -p "$PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASS" "$KEYCHAIN"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/id.p12"
+          # -A would let any binary use the key; -T limits it to codesign.
+          security import "$RUNNER_TEMP/id.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/id.p12"
+          # Without this codesign stops for a GUI prompt that no one can answer.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASS" "$KEYCHAIN" >/dev/null
+          # build-app.sh looks for the identity via find-identity, which searches
+          # the keychain list rather than a named keychain.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
       - name: Build .app
         env:
           SKIP_INSTALL: 1
